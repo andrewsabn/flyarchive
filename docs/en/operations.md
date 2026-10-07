@@ -5,7 +5,7 @@ Russian (original): [docs/operations.md](../operations.md)
 A guide for the owner of an installation: a person with Linux who sets FlyArchive up on their own machine, creates an archive and looks after it. You have your own directory, your own
 models and your own archive, so nothing "as the author has it" is required of you: the defaults are taken from the code (the reference is printed by `python3 tools/settings.py --reference`),
 and everything that depends on your machine is given as a setting. How the archive is built is described in `docs/en/architecture.md`, the requirements card by card in `docs/en/requirements.md`, and how a model should use the archive
-in `docs/en/for-llm.md`. The path from cloning the repository to the first document you find, which takes a few minutes, is at the beginning of `README.en.md`.
+in `docs/en/for-llm.md`. The path from cloning the repository to the first document you find, which takes a few minutes, is at the beginning of `README.md`.
 
 The archive command is `flyarchive` (the file `tools/flyarchive`). Until the installation has put it on the search path (PATH), call it by its path from the repository directory:
 `python3 tools/flyarchive doctor`. Further in the text it is written simply as `flyarchive`. The help of the command and of all its subcommands is `--help`; the help, the messages
@@ -201,7 +201,7 @@ interpreter, but is not code itself). Two practical consequences:
 
 Set up a production machine from a separate copy of the repository at the chosen version, not from the directory where development goes on: an edit in the working directory changes what the
 services run after a restart. The version is recorded in one place, `tools/version.py`: it is reported by `flyarchive --version`, by the MCP adapter when it introduces itself to a client, by the
-descriptions of the search service and the documents server, and by the plugin package (`dsh-plugin/package.json`); what changed between versions is in `CHANGELOG.en.md`.
+descriptions of the search service and the documents server, and by the plugin package (`dsh-plugin/package.json`); what changed between versions is in `CHANGELOG.md`.
 
 ### The command on the search path
 
@@ -310,7 +310,7 @@ What stays, and is not removed by these commands:
 ## Without services and without a shell
 
 The core works through commands alone, without systemd, without DSH, without docker, without tailscale and without a local model. The end-to-end path without services is covered by the test
-`tests/test_clean_install.py`; the "First five minutes" block in `README.en.md` leads through it with the samples from `examples/`.
+`tests/test_clean_install.py`; the "First five minutes" block in `README.md` leads through it with the samples from `examples/`.
 
 | What you want to do | What you need for it | What you do not need |
 |---|---|---|

@@ -22,7 +22,7 @@
 на настройку), перечень ключей `flyarchive search` и перечень состояний ссылки на команду (`--json` установки) называют всё, что есть в справке и в коде;
 замена ссылки, оставшейся от сборки до версии 0.1, названа только в перечне состояний.
 
-Все четыре документа (`docs/operations.md`, `docs/architecture.md`, `README.md`, `docs/for-llm.md`) проходят все проверки без исключений. Словарь LATER
+Все четыре документа (`docs/operations.md`, `docs/architecture.md`, `README.ru.md`, `docs/for-llm.md`) проходят все проверки без исключений. Словарь LATER
 пуст: в него вносят пару «проверка — файл» с названной причиной, если одну проверку для одного файла нужно ослабить на время; такой случай идёт
 как xfail без строгости (он не краснит набор, а когда файл исправлен, показывается как «неожиданно прошёл»), и пара уходит из словаря.
 """
@@ -43,7 +43,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 SELF = "tests/test_docs_for_reader.py"
 DOCS = ("docs/operations.md", "docs/architecture.md")
-OTHER = ("README.md", "docs/for-llm.md")
+OTHER = ("README.ru.md", "docs/for-llm.md")
 CHECKS = ("paths", "commands", "settings", "services", "traces")        # sections — только у DOCS (в README «раздел» — часть экрана DSH)
 
 # Пары «файл — проверка», которые на время не проходят. Сейчас таких нет: каждый документ проходит каждую проверку. Появилась пара — у неё есть причина,

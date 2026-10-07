@@ -19,7 +19,7 @@ from archivekit import Archive
 from test_inbox_cli import vectors  # noqa: F401 — подставной сервер векторов
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-README = os.path.join(ROOT, "README.md")
+README = os.path.join(ROOT, "README.ru.md")       # русский оригинал; блоки команд английской первой страницы держит тест пар
 EXAMPLES = os.path.join(ROOT, "examples")
 MARK = "<!-- first-five-minutes -->"
 NOT_RUN = ("git clone", "python3 -m venv", ". .venv/bin/activate", "python3 -m pip", "pip ", "pip3 ", "ollama")     # сеть, скачивание, окружение: не исполняются
@@ -81,7 +81,7 @@ def test_блок_начинается_с_клонирования_ставит_
     assert all(line.startswith(NOT_RUN) for line in lines[:first_own]), "до первой команды архива только клонирование и установка"
 
 
-@pytest.mark.parametrize("rel, heading", [("README.md", "\n## Постоянная установка"), ("README.en.md", "\n## Permanent installation")])
+@pytest.mark.parametrize("rel, heading", [("README.ru.md", "\n## Постоянная установка"), ("README.md", "\n## Permanent installation")])
 def test_блок_постоянной_установки_начинается_с_включения_окружения(rel, heading):
     """Назавтра человек открывает новый терминал: установка пишет в службы и в запускалку интерпретатор, которым её запустили,
     и без включённого окружения это системный Python без библиотек. Поэтому первая строка блока — включение окружения."""

@@ -231,3 +231,11 @@ def test_каждая_строка_исключений_чему_то_соотв
     raw, _, allow = scan(ROOT, open_files())
     assert len(allow.entries) == len(allow_rows(ROOT)) and allow.problems == [], "строки исключений приняты не все"
     assert stale_rows(allow, raw, with_words=False) == []
+
+
+def test_у_каждой_строки_исключений_есть_файл_в_открытой_части():
+    """Строки о словах на устаревание не проверяются: список слов лежит у владельца. Поэтому у строки обязан существовать хотя бы файл:
+    файл переименовали — строка со старым именем краснит тест, а не ждёт, пока под этим именем появится другой файл и она снимет в нём находку."""
+    files = open_files()
+    _, _, allow = scan(ROOT, files)
+    assert [(n, pattern) for n, pattern, _, _ in allow.entries if not any(fnmatch.fnmatchcase(name, pattern) for name in files)] == []

@@ -1,6 +1,7 @@
 """Открытые документы есть на русском и на английском, и перевод не расходится с оригиналом (решение владельца: документация на двух языках).
 
-Русский документ — оригинал, английский лежит рядом: `README.md` → `README.en.md`, `CHANGELOG.md` → `CHANGELOG.en.md`, `docs/<имя>.md` →
+Русский документ — оригинал, английский лежит рядом: `README.ru.md` → `README.md`, `CHANGELOG.ru.md` → `CHANGELOG.md` (первая страница
+репозитория — английская: хостинг показывает посетителю `README.md` из корня), `docs/<имя>.md` →
 `docs/en/<имя>.md`. Тест не читает смысл — он держит то, что можно сверить: у пары те же заголовки тех же уровней в том же порядке, те же блоки
 кода с теми же командами, те же таблицы, те же имена в обратных кавычках, ссылки ведут на документы своего языка, а в английском тексте нет
 русского вне имён и цитат. Правка одного документа пары без другого краснит тест.
@@ -10,10 +11,12 @@ import re
 
 import pytest
 
+from openpart import open_files
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PAIRS = {
-    "README.md": "README.en.md",
-    "CHANGELOG.md": "CHANGELOG.en.md",
+    "README.ru.md": "README.md",
+    "CHANGELOG.ru.md": "CHANGELOG.md",
     "docs/operations.md": "docs/en/operations.md",
     "docs/architecture.md": "docs/en/architecture.md",
     "docs/for-llm.md": "docs/en/for-llm.md",
@@ -31,6 +34,7 @@ HEADING_SAMPLE = re.compile(r"^(#{1,6} .*? — ).*$")
 NAME = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_./~:-]*")
 CARD = re.compile(r"\b(?:FR|NFR)-\d+[а-я]")       # номер карточки с буквой: имя, одно на оба языка
 CASES = list(PAIRS.items())
+SAME = {en: ru for ru, en in PAIRS.items()}       # имя перевода — то же имя, что имя оригинала: каждый язык отсылает читателя к своему варианту
 
 
 def read(rel):
@@ -88,11 +92,13 @@ def command(line):
 
 
 def names(lines):
-    """Латинские имена в строках схемы с числом вхождений: службы, порты, файлы, команды — то, что перевод подписей обязан сохранить."""
+    """Латинские имена в строках схемы с числом вхождений: службы, порты, файлы, команды — то, что перевод подписей обязан сохранить.
+    Имя документа пары считается одним именем, как и в `ticks`: перечень файлов называет читателю вариант на его языке."""
     found = {}
     for line in lines:
         for token in NAME.findall(line):
             token = token.rstrip(".:-")
+            token = SAME.get(token, token)
             if token:
                 found[token] = found.get(token, 0) + 1
     return found
@@ -123,11 +129,10 @@ def ticks(prose):
 
     Одно исключение — имена самих документов пары: читателя английский текст отсылает к английскому варианту (`docs/en/operations.md`),
     поэтому имя перевода считается тем же именем, что и имя оригинала."""
-    same = {en: ru for ru, en in PAIRS.items()}
     found = {}
     for line in prose:
         for token in TICK.findall(line):
-            token = neutral(same.get(token, token))
+            token = neutral(SAME.get(token, token))
             found[token] = found.get(token, 0) + 1
     return found
 
@@ -154,7 +159,7 @@ def test_разбор_документа_отделяет_блоки_кода_с
     assert blocks == [("bash", ["cmd one   # пояснение"]), ("", ["схема"])]
     assert command("cmd one   # пояснение") == "cmd one" and command("cmd # x") == "cmd" and command("# только пояснение") == ""
     assert ticks(prose) == {"x": 1} and differs({"x": 1, "y": 2}, {"x": 1, "y": 1, "z": 1}) == {"y": (2, 1), "z": (0, 1)}
-    assert ticks(["see `docs/en/operations.md` and `README.en.md`"]) == ticks(["см. `docs/operations.md` и `README.md`"])
+    assert ticks(["see `docs/en/operations.md` and `README.md`"]) == ticks(["см. `docs/operations.md` и `README.ru.md`"])
 
 
 def test_перевод_вправе_заменить_только_слова_подстановки_и_буквы_образца_даты():
@@ -174,6 +179,8 @@ def test_блок_с_языком_сверяется_построчно_а_сх�
     assert block_gap(scheme, ("", ["browser ── DSH :3080 ─┐", "   search :8765   tools/webui.py"])) is None
     assert "8765" in block_gap(scheme, ("", ["browser ── DSH :3080 ─┐", "   search   tools/webui.py"]))
     assert "строк 2 и 1" in block_gap(scheme, ("", ["browser ── DSH :3080 ─┐ search :8765 tools/webui.py"]))
+    assert block_gap(("", ["CHANGELOG.ru.md   что изменилось"]), ("", ["CHANGELOG.md   what changed"])) is None, "перечень называет вариант своего языка"
+    assert "CHANGELOG.ru.md" in block_gap(("", ["CHANGELOG.ru.md   что изменилось"]), ("", ["LICENSE   what changed"]))
 
 
 def test_поиск_русского_в_английском_тексте_пропускает_имена_и_цитаты_и_находит_остальное():
@@ -228,8 +235,33 @@ def test_ссылки_ведут_на_документы_своего_языка
             assert path not in other or path == pair, f"{rel}: ссылка на документ другого языка {target}"
 
 
-def test_русский_и_английский_README_ссылаются_друг_на_друга():
-    assert "(README.en.md)" in read("README.md") and "(README.md)" in read("README.en.md")
+def test_русский_и_английский_варианты_в_корне_ссылаются_друг_на_друга():
+    for name in ("README", "CHANGELOG"):
+        assert f"({name}.md)" in read(f"{name}.ru.md") and f"({name}.ru.md)" in read(f"{name}.md"), name
+
+
+def cyrillic_share(text):
+    letters = [ch for ch in text if ch.isalpha()]
+    return len(CYRILLIC.findall(text)) / max(1, len(letters))
+
+
+@pytest.mark.parametrize("name", ["README", "CHANGELOG"])
+def test_первая_страница_репозитория_английская_а_оригинал_лежит_рядом(name):
+    """Хостинг показывает посетителю файл `README.md` из корня. Описание и темы репозитория английские, значит и первая страница английская;
+    русский оригинал лежит рядом под именем с `.ru`. В английском варианте русское остаётся только в цитатах вывода программы."""
+    assert cyrillic_share(read(f"{name}.md")) < 0.2 < cyrillic_share(read(f"{name}.ru.md")), name
+
+
+def test_прежних_имён_переводов_нет_ни_файлами_ни_в_тексте():
+    """Перевод больше не носит имя с `.en`: такой файл в корне или ссылка на него — след прежней раскладки, читателя она ведёт в никуда."""
+    old = [name + ".en.md" for name in ("README", "CHANGELOG")]
+    assert not [rel for rel in old if os.path.exists(os.path.join(ROOT, rel))]
+    found = []
+    for rel in open_files():
+        with open(os.path.join(ROOT, rel), encoding="utf-8", errors="ignore") as f:
+            text = f.read()
+        found += [(rel, name) for name in old if name in text]
+    assert found == []
 
 
 def test_карточки_требований_у_пары_те_же_номера_и_та_же_сила():

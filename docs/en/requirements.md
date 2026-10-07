@@ -694,6 +694,8 @@ the owner's data and secrets do not get into the public repository in any form.
   anything that could not be installed from the description is counted as a defect of the description.
 - The documentation language of the public repository is Russian and English: each public document exists in two
   versions with the same content; a test checks that each document has a pair and that the set of sections in the pair is the same.
+  The front page of the repository is in English: `README.md` and `CHANGELOG.md` are the English versions, and the Russian originals lie next to them as `README.ru.md` and
+  `CHANGELOG.ru.md`; the other documents are Russian in `docs/` and English in `docs/en/`.
 - Version: a version file and a changelog; the first public version is 0.1, with a list of what is included and what is not included.
 - Before publication, a check by outside eyes: another model receives the clean snapshot and a task to find anything personal in it; findings are closed before publication.
 
