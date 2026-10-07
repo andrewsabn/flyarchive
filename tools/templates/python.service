@@ -1,0 +1,16 @@
+[Unit]
+Description={description}
+
+[Service]
+Type=simple
+UMask=0077
+Environment=FLYARCHIVE_HOME={home}
+WorkingDirectory={code}
+ExecStart={python} {code}/{script}
+Restart=on-failure
+RestartSec=5
+StandardOutput=append:{home}/logs/{name}.log
+StandardError=append:{home}/logs/{name}.log
+
+[Install]
+WantedBy=default.target

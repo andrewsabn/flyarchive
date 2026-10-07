@@ -1,0 +1,46 @@
+{
+  "roots": {
+    "converted": {"kind": "files", "source": "office-converted"},
+    "mail-a": {
+      "kind": "mail",
+      "source": "mail-other",
+      "rules": [
+        {"contains": ["alpha.example.com"], "source": "mail-alpha"},
+        {"contains": ["beta.example.net", "outbox_beta", "2020_archive"], "source": "mail-beta"}
+      ]
+    },
+    "mail-b": {
+      "kind": "mail",
+      "source": "mail-live",
+      "rules": [{"contains": ["gamma"], "source": "mail-gamma"}],
+      "rank": 1
+    },
+    "mail-c": {"kind": "mail", "source": "mail-archive", "rank": 0},
+    "shared-drive": {
+      "kind": "files",
+      "source": "drive-work",
+      "rules": [{"first_part_prefix": "_notes", "source": "drive-notes"}],
+      "title": "folder"
+    },
+    "wiki": {"kind": "pages", "source": "wiki", "attachments": "wiki-att"},
+    "tracker": {"kind": "pages", "source": "tracker", "attachments": "tracker-att"}
+  },
+  "labels": {
+    "wiki": "Wiki pages",
+    "wiki-att": "Wiki attachments",
+    "tracker": "Tracker tickets",
+    "tracker-att": "Tracker attachments",
+    "office-converted": "Office files converted from old formats",
+    "mail-alpha": "Mail of the alpha mailbox",
+    "mail-beta": "Mail of the beta mailbox",
+    "mail-archive": "Mail archive with sent letters",
+    "mail-live": "Current mail cache",
+    "mail-gamma": "Mail of the gamma mailbox",
+    "mail-other": "Other mail",
+    "drive-work": "Work folders of the shared drive",
+    "drive-notes": "Notes folders of the shared drive"
+  },
+  "aliases": {
+    "old-wiki-export": "wiki"
+  }
+}

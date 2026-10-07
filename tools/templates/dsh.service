@@ -1,0 +1,19 @@
+[Unit]
+Description={description}
+After=flyarchive-mcp.service
+Wants=flyarchive-search.service flyarchive-office.service flyarchive-mcp.service
+
+[Service]
+Type=simple
+UMask=0077
+Environment=PATH={path}
+Environment=FLYARCHIVE_HOME={home}
+WorkingDirectory={code}
+ExecStart={code}/dsh-web-start
+Restart=on-failure
+RestartSec=10
+StandardOutput=append:{home}/logs/dsh-web.log
+StandardError=append:{home}/logs/dsh-web.log
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,2 @@
+# Для тестов: python3 -m pytest. Библиотеки самой программы — requirements.txt и requirements-optional.txt (тестам нужны и они).
+pytest>=9.1  # запуск тестов

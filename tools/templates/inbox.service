@@ -1,0 +1,12 @@
+[Unit]
+Description=Разбор входящей папки архива
+
+[Service]
+Type=oneshot
+UMask=0077
+Environment=FLYARCHIVE_HOME={home}
+WorkingDirectory={code}
+ExecStart={python} {code}/flyarchive inbox run
+Nice=10
+StandardOutput=append:{home}/logs/inbox.log
+StandardError=append:{home}/logs/inbox.log

@@ -1,0 +1,28 @@
+# данные и индекс: сотни гигабайт, место им на машине
+corpus/
+index/
+out/
+logs/
+cache/
+*.jsonl
+*.lance/
+
+# ключи и токены
+.env
+api-key
+*.key
+*credentials*
+
+# следы работы
+.venv/
+__pycache__/
+*.pyc
+*.bak
+*.bak[0-9]
+*.bak-*
+wheels/
+
+# отчёты проверок содержат имена файлов и отправителей — в репозиторий не идут
+reports/
+staging/
+secrets/

@@ -1,0 +1,25 @@
+The tally file format (an invented example)
+
+A tally file keeps a list of named counters in plain text. It is meant for small programs that count things, such as visitors of a boat
+rental or laps of a training run. This description is made up for the sample archive and does not belong to any real software.
+
+Layout
+
+The first line is the header: the word TALLY, a space and the format version, for example "TALLY 2".
+Every following line is one record: the counter name, an equals sign and a whole number, for example "laps=12".
+A line that starts with a hash mark is a comment and is ignored.
+The last line starts with "sum=" and holds the total of all counters, so that a damaged file can be noticed.
+
+Rules
+
+Counter names use lowercase Latin letters, digits and the underscore, and are at most thirty characters long.
+A counter may not be negative. When a program needs to go below zero it must write a new counter instead.
+Two counters with the same name in one file make the file invalid; the reader reports the second occurrence.
+
+Example
+
+TALLY 2
+# morning session
+laps=12
+rest_breaks=3
+sum=15

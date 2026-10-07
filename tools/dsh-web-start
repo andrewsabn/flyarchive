@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+# Поднимает веб-интерфейс DeepSeek Harness с инструментами архива.
+#
+# Всё нужное берётся из настроек (tools/settings.py --get КЛЮЧ) и из места, где лежит сам файл: каталог архива, порт оболочки, порт переходника MCP,
+# дополнительные файлы настройки оболочки (модели и поставщики — дело владельца, настройка dsh_patches), ключ локальной модели и переменные из
+# файла окружения. Служебный токен и ключи в настройки и в службу не пишутся: они читаются при запуске и передаются переменными окружения.
+#
+# Ждёт переходник MCP: DSH спрашивает у него список инструментов один раз при
+# старте. Поднимется раньше — окажется без инструментов и не скажет об этом.
+set -euo pipefail
+
+TOOLS=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
+BASE=$(python3 "$TOOLS/settings.py" --get home)
+PORT=$(python3 "$TOOLS/settings.py" --get dsh_port)
+MCP_PORT=$(python3 "$TOOLS/settings.py" --get mcp_port)
+# имя профиля оболочки — последняя часть пути настройки dsh_profile (по умолчанию ~/.dsh/profiles/web): туда установка кладёт плагин
+PROFILE=$(python3 "$TOOLS/settings.py" --get dsh_profile)
+PROFILE=${PROFILE%/}
+PROFILE=${PROFILE##*/}
+PATCH=$BASE/dsh.patch.yml
+
+# команда архива: запускалка, которую пишет установка (она идёт тем Python, где стоят библиотеки); нет её — файл команды из каталога кода
+CLI=$BASE/bin/flyarchive
+[ -x "$CLI" ] || CLI=$TOOLS/flyarchive
+
+# слушает ли кто-нибудь порт на петле: тем же python3, что читает настройки (ss из пакета iproute2 есть не на каждой машине)
+listening() {
+  python3 -c 'import socket, sys; socket.create_connection(("127.0.0.1", int(sys.argv[1])), 2).close()' "$1" 2>/dev/null
+}
+
+for _ in $(seq 1 60); do
+  listening "$MCP_PORT" && break
+  sleep 2
+done
+listening "$MCP_PORT" || {
+  echo "переходник MCP на $MCP_PORT не поднялся — инструментов не будет" >&2
+  exit 1
+}
+
+[ -r "$PATCH" ] || {
+  echo "нет файла настройки оболочки $PATCH — выполни: flyarchive install" >&2
+  exit 1
+}
+
+# служебный токен локального DSH: без него переходник MCP отвечает 401.
+# Создаётся при первом запуске и лежит в закрытом файле; права шире 600 — отказ.
+"$CLI" token init-local > /dev/null || {
+  echo "служебный токен локального DSH не готов — причина строкой выше" >&2
+  exit 1
+}
+FLYARCHIVE_LOCAL_TOKEN=$(tr -d '\r\n' < "$BASE/secrets/local.token")
+export FLYARCHIVE_LOCAL_TOKEN
+
+# ключ локальной модели: служба systemd не читает .bashrc. Файл с ключом (llm_key_file) и имя переменной, под которым оболочка ждёт ключ
+# (dsh_llm_key_env), задаёт владелец; не задано одно из двух — оболочке ключ не передаётся. Готовую переменную окружения файл не перебивает.
+KEY_ENV=$(python3 "$TOOLS/settings.py" --get dsh_llm_key_env)
+KEY_FILE=$(python3 "$TOOLS/settings.py" --get llm_key_file)
+if [ -n "$KEY_ENV" ] && [ -n "$KEY_FILE" ] && [ -z "${!KEY_ENV:-}" ] && [ -r "$KEY_FILE" ]; then
+  KEY_VALUE=$(tr -d '\r\n' < "$KEY_FILE")
+  export "$KEY_ENV=$KEY_VALUE"
+fi
+
+# файл окружения владельца (env_file): из него берутся только переменные, названные настройкой env_names, прочее в окружение не попадает.
+# Готовую переменную окружения файл не перебивает.
+ENV_FILE=$(python3 "$TOOLS/settings.py" --get env_file)
+ENV_NAMES=$(python3 "$TOOLS/settings.py" --get env_names)
+if [ -n "$ENV_FILE" ] && [ -r "$ENV_FILE" ]; then
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    if [[ ! "$name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+      echo "env_names: пропущено имя, которое не годится для переменной окружения" >&2
+      continue
+    fi
+    [ -z "${!name:-}" ] || continue
+    # строка именно этой переменной: в файле могут быть другие, а в самом значении — знак «=»
+    value=$(sed -n 's/^[[:space:]]*\(export[[:space:]]\{1,\}\)\{0,1\}'"$name"'[[:space:]]*=[[:space:]]*//p' "$ENV_FILE" | tail -n 1 | tr -d '\r"'"'")
+    if [ -n "$value" ]; then
+      export "$name=$value"
+    fi
+  done <<< "$ENV_NAMES"
+fi
+
+args=(--profile "$PROFILE" --patch "$PATCH")
+PATCHES=$(python3 "$TOOLS/settings.py" --get dsh_patches)
+while IFS= read -r extra; do
+  [ -z "$extra" ] || args+=(--patch "$extra")
+done <<< "$PATCHES"
+
+exec dsh "${args[@]}" --no-open --host 127.0.0.1 --port "$PORT"

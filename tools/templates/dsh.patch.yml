@@ -1,0 +1,23 @@
+# Архив для DeepSeek Harness: подключение сервера MCP архива и плагина «Архив» в настройках. Файл собирает `flyarchive install`.
+# Моделей и их поставщиков здесь нет: дополнительные файлы настройки оболочки перечисляет настройка dsh_patches.
+#
+# Инструменты архива приходят под именами mcp__flyarchive__*: поиск, чтение документов, схемы, графики, сборка файлов.
+# Служебный токен в файл не пишется: запускалка читает его из закрытого файла архива и передаёт переменной FLYARCHIVE_LOCAL_TOKEN.
+
+- insert:
+    - id: mcp-flyarchive
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: flyarchive
+        transport: streamable-http
+        url: '{mcp_url}'
+        headers:
+          Authorization: !!js '`Bearer ${process.env.FLYARCHIVE_LOCAL_TOKEN}`'
+        # чтение стостраничного pdf и отрисовка схемы занимают заметное время
+        toolCallTimeoutMs: 300000
+        failOnStartupError: false
+    # раздел «Архив» в настройках: токены клиентов и журнал обращений; работает через команду flyarchive
+    - id: flyarchive-admin
+      name: 'flyarchive-dsh-plugin'
+      config:
+        command: '{launcher}'

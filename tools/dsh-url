@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# Печатает текущую ссылку на DSH со свежим токеном.
+#
+# Ссылка лежит в журнале оболочки в каталоге архива, порт — из настроек (dsh_port).
+# Запуск: <каталог репозитория>/tools/dsh-url; из Windows — через wsl: wsl -- <каталог репозитория>/tools/dsh-url
+set -euo pipefail
+
+TOOLS=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
+LOG=$(python3 "$TOOLS/settings.py" --get home)/logs/dsh-web.log
+PORT=$(python3 "$TOOLS/settings.py" --get dsh_port)
+[ -r "$LOG" ] || { echo "нет журнала $LOG" >&2; exit 1; }
+
+# -a: в журнал попадают управляющие байты, и без него grep пишет
+# «binary file matches» вместо самой ссылки
+url=$(grep -ao "http://127\.0\.0\.1:$PORT/?token=[A-Za-z0-9_-]*" "$LOG" | tail -1 || true)   # без ссылки grep отдаёт 1: подсказка ниже должна дойти
+[ -n "$url" ] || { echo "ссылка не найдена, смотри: systemctl --user status flyarchive-dsh" >&2; exit 1; }
+printf '%s\n' "$url"

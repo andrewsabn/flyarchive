@@ -1,0 +1,1307 @@
+#!/usr/bin/env python3
+"""Команда архива: установка и проверка, токены доступа, поиск, приём файлов, индекс, просмотр, подключение моделей.
+
+    flyarchive doctor [--json]                                 проверить окружение: библиотеки, программы, служба векторов, архив; ничего не меняет
+    flyarchive init [--json]                                    завести пустой архив: каталоги, служебный токен, база сверки, таблица индекса
+    flyarchive install [--dry-run] [--no-start] [--no-plugin] [--no-dsh] [--gateway auto|off] [--json]   поставить всё: архив, службы и таймер из шаблонов, плагин, команду в PATH
+    flyarchive token add <имя> [--level read|full] [--days N]   выпустить токен клиенту
+    flyarchive token list                                       кто имеет доступ
+    flyarchive token revoke <имя>                               отозвать, действует сразу
+    flyarchive token init-local                                 служебный токен локального DSH
+    flyarchive open                                             ссылка входа на страницу поиска
+    flyarchive search <запрос> [-k N] [--source ИМЯ] [--since ДАТА] [--space ИМЯ] [--today ГГГГММДД] [--full] [--json]   найти документы: тот же поиск, что на странице
+    flyarchive journal [-n 30] [--client имя]                   последние обращения
+    flyarchive check <файл или папка> --into <папка>            разобрать пачку: распаковка, приёмка, отчёт
+    flyarchive known build                                      собрать базу известного: что уже лежит в архиве
+    flyarchive known status                                     состояние этой базы
+    flyarchive index dedupe [--apply]                           убрать из индекса повторы писем и файлов почты
+    flyarchive index dates [--apply]                            поставить настоящие даты письмам и вложениям
+    flyarchive index optimize [--compact] [--gpu] [--json]      построить поисковые индексы; с --compact ещё уплотнить таблицу
+    flyarchive preview show [--member N]… --area queue|quarantine|corpus [--json] -- путь   что в файле: текст, страницы, письмо с вложениями, состав архива
+    flyarchive preview page [--member N]… --area … -- путь номер                            страница в PNG (в stdout)
+    flyarchive preview clean [--json]                           убрать из кэша просмотра старое и лишнее
+    flyarchive preview setup [--image ИМЯ] [--json]             скачать образ контейнера для Office и HTML и записать его дайджест
+    flyarchive inbox set [--path ПАПКА] [--period N] [--llm on|off] [--cloud on|off] [--vision on|off] [--service-name ШАБЛОН] [--service-fate return|delete] [--no-timer] [--json]   папка, период разбора, проверка и описание картинок моделью, имена служебных файлов и их судьба
+    flyarchive inbox run [--wait]                               разобрать входящую папку сейчас
+    flyarchive inbox kick [--json]                              запустить разбор службой и не ждать конца
+    flyarchive inbox status [--json]                            что настроено и что ждёт
+    flyarchive inbox batches [--limit N] [--before ПАЧКА] [--json]   история пачек разбора, от новой к старой
+    flyarchive inbox batch <пачка> [--json]                     одна пачка: файлы, решения, где что лежит
+    flyarchive vision run [--limit N] [--json]                  отдать долги «ждёт описания» сейчас
+    flyarchive vision status [--json]                           сколько документов ждёт описания и сколько описано
+    flyarchive vision backfill --limit N [--source ИМЯ] [--dry-run] [--json]   записать долгами старые документы без текста в индексе
+    flyarchive connect [--remote] [--env ИМЯ] claude|codex|opencode|dsh|generic   настроить подключение оболочки модели к архиву по MCP
+    flyarchive queue list [--json]                              что ждёт решения владельца
+    flyarchive queue accept [--defer-index] [--json] [путь …]   принять документы в архив
+    flyarchive queue quarantine [--json] [путь …]               отправить документы в карантин
+    flyarchive quarantine list [--json]                         что лежит в карантине
+    flyarchive quarantine delete [--json] путь                  стереть файл из карантина
+    flyarchive quarantine return [--json] [путь …]              вернуть файлы в папку возврата, не в архив
+    flyarchive doc delete [--json] [--yes] путь                 убрать документ из архива и индекса
+    flyarchive perms check [--deep]                             проверить, закрыт ли архив от других пользователей
+    flyarchive perms fix [--deep]                               закрыть: 700 на каталогах, 600 на файлах
+    flyarchive run [--dir КАТАЛОГ] [--name ИМЯ] [--env ИМЯ] [--ro КАТАЛОГ] -- команда   запустить оболочку внешней модели в песочнице: архива она не видит
+
+Уровни: read — поиск и чтение документов; full — ещё создание файлов и
+передача документов. Удаление и решения по приёмке — только на этой машине.
+"""
+import argparse
+import calendar
+import json
+import os
+import re
+import shlex
+import stat
+import sys
+import time
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import auth
+import messages
+import perms
+import settings
+import sources
+import tokens
+import version
+
+_SETTINGS = settings.startup()
+SEARCH_URL = f"http://127.0.0.1:{_SETTINGS['search_port']}"
+SANDBOX_DIR = _SETTINGS["sandbox_dir"]          # каталог песочницы: у каждой оболочки внутри него свой домашний каталог
+LOCAL_NAME = "dsh-local"
+
+
+def local_time(ts):
+    """Время записи журнала (UTC) в поясе этой машины."""
+    try:
+        return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(calendar.timegm(time.strptime(ts, "%Y-%m-%dT%H:%M:%SZ"))))
+    except (TypeError, ValueError):
+        return str(ts)
+
+
+def state(row, now):
+    if row["revoked"]:
+        return "отозван " + row["revoked"][:10]
+    if row["expires"] and row["expires"] <= now:
+        return "просрочен"
+    return "действует"
+
+
+def audit(guard, tool, params, error=None):
+    """Выпуск и отзыв токена — в журнал: кто получил доступ к архиву и когда его лишился."""
+    guard.journal.write(server="cli", client="владелец", tool=tool, params=params, status=1 if error else 0,
+                        outcome=f"отказ: {error}" if error else "ok", ms=0)
+
+
+def emit(data):
+    """Вывод для программ: раздел «Архив» в DSH читает его как JSON."""
+    print(json.dumps(data, ensure_ascii=False))
+
+
+def token_add(guard, a):
+    params = {"name": a.name, "level": a.level, "days": a.days}
+    try:
+        token = guard.store.issue(a.name, a.level, a.days)
+    except tokens.TokenError as e:
+        audit(guard, "token add", params, e)
+        raise
+    audit(guard, "token add", params)
+    if a.json:
+        row = [r for r in guard.store.list() if r["name"] == a.name and not r["revoked"]][-1]
+        return emit({"name": a.name, "level": a.level, "token": token, "expires": row["expires"]})
+    print(f"Токен клиента «{a.name}», уровень {a.level}:")
+    print(token)
+    print("Сохрани его сейчас: второй раз он не показывается.")
+
+
+def token_list(guard, a):
+    rows = guard.store.list()
+    now = tokens.stamp(guard.clock())
+    if a.json:
+        return emit([{**r, "state": state(r, now).split()[0]} for r in rows])
+    if not rows:
+        print("Токенов нет.")
+        return
+    table = [("имя", "уровень", "выпущен", "срок", "последний вызов", "состояние")]
+    for r in rows:
+        table.append((r["name"], r["level"], r["created"][:10], (r["expires"] or "без срока")[:10],
+                      local_time(r["last_used"]) if r["last_used"] else "не было", state(r, now)))
+    widths = [max(len(row[i]) for row in table) for i in range(len(table[0]))]
+    for row in table:
+        print("  ".join(cell.ljust(w) for cell, w in zip(row, widths)).rstrip())
+
+
+def token_revoke(guard, a):
+    try:
+        guard.store.revoke(a.name)
+    except tokens.TokenError as e:
+        audit(guard, "token revoke", {"name": a.name}, e)
+        raise
+    audit(guard, "token revoke", {"name": a.name})
+    if a.json:
+        return emit({"name": a.name, "revoked": True})
+    print(f"Токен «{a.name}» отозван. Следующий запрос с ним получит отказ.")
+
+
+def local_token(guard, touch=True):
+    """Служебный токен локального DSH лежит в закрытом файле; запускалка DSH читает его сама. Готовый, годный токен не трогается.
+    Возвращает (путь к файлу, выпущен ли токен сейчас). Права на секреты и хранилище проверяются здесь же: отказ один для всех, кто зовёт.
+    touch=False — проверка готового токена не отмечается как его вызов (хранилище при этом не пишется)."""
+    guard.startup_check()
+    path = os.path.join(guard.secrets, "local.token")
+    if os.path.exists(path):
+        if stat.S_IMODE(os.stat(path).st_mode) & 0o077:
+            raise auth.AuthError(messages.make("cli.local_token_open", path=path))
+        with open(path, encoding="utf-8") as f:
+            client = guard.store.verify(f.read().strip(), touch=touch)
+        if client and client.name == LOCAL_NAME and client.level == "local":
+            return path, False
+    if any(r["name"] == LOCAL_NAME and not r["revoked"] for r in guard.store.list()):
+        guard.store.revoke(LOCAL_NAME)
+    token = guard.store.issue(LOCAL_NAME, "local")
+    fd = os.open(path + ".tmp", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(token + "\n")
+    os.replace(path + ".tmp", path)
+    return path, True
+
+
+def token_init_local(guard, a):
+    path, issued = local_token(guard)
+    if not issued:
+        print(f"Служебный токен на месте: {path}")
+        return
+    print(f"Служебный токен локального DSH выпущен и записан в {path}")
+    print("Перезапусти DSH, чтобы он его подхватил.")
+
+
+def _dir_step(path):
+    """Каталог с правами владельца; готовый не трогается, права на нём не правятся. Возвращает (создан ли, сообщение)."""
+    if os.path.isdir(path):
+        return False, messages.make("init.dir_exists", path=path)
+    os.makedirs(path, mode=0o700, exist_ok=True)
+    return True, messages.make("init.dir_created", path=path)
+
+
+def _token_step(guard):
+    path, issued = local_token(guard, touch=False)
+    if issued:
+        return True, messages.make("init.token_created", path=path)
+    return False, messages.make("init.token_exists", path=path)
+
+
+def _known_step(home):
+    """Пустая база сверки — то же, что `known build` на пустом корпусе; если в корпусе уже есть файлы, база строится по ним, а не пустой."""
+    import known
+    db = os.path.join(home, "index", "known.sqlite")
+    if os.path.exists(db):
+        return False, messages.make("init.known_exists", path=db)
+    known.build(corpus=os.path.join(home, "corpus"), db=db, jobs=min(16, os.cpu_count() or 1),
+                progress=lambda n, total: print(f"прочитано {n} из {total}", file=sys.stderr, flush=True))
+    return True, messages.make("init.known_created", path=db)
+
+
+def _table_step(home):
+    import ingest
+    folder = ingest.index_dir(home)
+    if ingest.create_table(home):
+        return True, messages.make("init.table_created", path=folder, dim=ingest.DIM)
+    return False, messages.make("init.table_exists", path=folder)
+
+
+def _owner_todo(home):
+    """Что владельцу остаётся сделать самому: только то, что на самом деле ещё не настроено. [(id, сообщение)]."""
+    import preview_container
+    todo = []
+    if preview_container.image(home) is None:
+        todo.append(("preview", messages.make("init.todo_preview")))
+    if not _SETTINGS["llm_local_model"]:
+        todo.append(("model", messages.make("init.todo_model")))
+    if not os.path.exists(os.path.join(home, "inbox.json")):
+        todo.append(("inbox", messages.make("init.todo_inbox")))
+    return todo
+
+
+def init_steps(guard, report=None):
+    """Готовит каталог архива к работе (FR-103): каталоги с правами владельца, служебный токен, пустая база сверки, пустая таблица индекса.
+    Каждый шаг — «создано» или «уже есть»: готовое не пересоздаётся и не меняется, таблица индекса с документами не открывается вовсе.
+    Права на секреты и хранилище токенов проверяются так же, как у `token init-local`: отказ тот же. Сбой шага — init.step_failed.
+    report(сообщение) зовётся после каждого шага. Возвращает (шаги, что осталось владельцу). Тот же код зовёт `flyarchive install`."""
+    home = tokens.HOME
+    steps = []
+
+    def run(id_, step, *args):
+        try:
+            created, message = step(*args)
+        except messages.CodedError:
+            raise                                   # отказ с кодом (права, настройки): как у соседних команд
+        except Exception as e:
+            raise auth.AuthError(messages.make("init.step_failed", what=id_, why=f"{type(e).__name__}: {e}"[:200]))
+        steps.append({"id": id_, "result": "created" if created else "exists", "message": message})
+        if report:
+            report(message)
+
+    run("home", _dir_step, home)
+    run("secrets", _dir_step, os.path.join(home, "secrets"))
+    run("token", _token_step, guard)
+    for name in ("logs", "index", "corpus"):
+        run(name, _dir_step, os.path.join(home, name))
+    run("known", _known_step, home)
+    run("table", _table_step, home)
+    return steps, _owner_todo(home)
+
+
+def init_archive(guard, a):
+    """Команда `flyarchive init`: шаги init_steps, что сделано и что осталось сделать руками."""
+    home = tokens.HOME
+    if not a.json:
+        print(f"Каталог архива: {home}")
+    steps, todo = init_steps(guard, None if a.json else lambda message: print(f"  {message}", flush=True))
+    if a.json:
+        return emit({"home": home, "steps": [{**s, "message": s["message"].to_json()} for s in steps],
+                     "todo": [{"id": id_, "message": m.to_json()} for id_, m in todo]})
+    if not todo:
+        print("Архив готов к работе: осталось положить файлы во входящую папку.")
+    else:
+        print("Осталось сделать самому:")
+        for _, message in todo:
+            print(f"  {message}")
+    import doctor
+    print(doctor.tail(doctor.collect(_SETTINGS, notify=doctor.say_waiting)))     # чего обязательного не хватает: из той же проверки, что `flyarchive doctor`
+
+
+def doctor_check(guard, a):
+    """Команда `flyarchive doctor`: проверка окружения (FR-107), ничего не меняет и не создаёт. Код — в doctor.py. 0 — обязательное на месте."""
+    import doctor
+    text, code = doctor.report(doctor.collect(_SETTINGS, notify=None if a.json else doctor.say_waiting), a.json)
+    print(text)
+    return code
+
+
+def install_system(guard, a):
+    """Команда `flyarchive install` (FR-104): архив (тот же init), службы и таймер из шаблонов, плагин, файл настройки оболочки, запуск. Код — в install.py."""
+    import install
+    return install.run(a, init=lambda report: init_steps(guard, report))
+
+
+MINUTE_WORDS = ("одну", "две", "три", "четыре", "пять", "шесть", "семь", "восемь", "девять", "десять")
+
+
+def plural(n, forms):
+    """Форма слова при числе n: (1 минуту, 2 минуты, 5 минут)."""
+    if n % 10 == 1 and n % 100 != 11:
+        return forms[0]
+    if 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14:
+        return forms[1]
+    return forms[2]
+
+
+def lasts(seconds):
+    """Срок для фразы «действует …»: целые минуты — минутами (до десяти — словом), остальное — секундами."""
+    if seconds % 60 == 0:
+        minutes = seconds // 60
+        number = MINUTE_WORDS[minutes - 1] if minutes <= len(MINUTE_WORDS) else str(minutes)
+        return f"{number} {plural(minutes, ('минуту', 'минуты', 'минут'))}"
+    return f"{seconds} {plural(seconds, ('секунду', 'секунды', 'секунд'))}"
+
+
+def open_page(guard, a):
+    code = guard.new_login_code()
+    print(f"Страница поиска. Ссылка одноразовая, действует {lasts(_SETTINGS['login_ttl_s'])}:")
+    print(f"{SEARCH_URL}/login?c={code}")
+
+
+def search_archive(guard, a):
+    """Поиск из командной строки (FR-107): тот же поиск, тот же вывод и те же отказы, что у `python3 tools/search.py` (общие search.search и search.show).
+    Нет библиотеки, таблицы индекса или службы векторов — отказ с кодом без трассировки, код возврата 1; таблица и каталог индекса не заводятся."""
+    import search
+    try:
+        hits = search.search(a.query, a.k, a.since, a.source, a.space, a.today)
+    except search.SearchError as e:
+        raise auth.AuthError(messages.of(e))
+    except search.BadQuery as e:
+        raise auth.AuthError(messages.make("generic.text", text=str(e)))
+    if a.json:
+        return emit({"query": a.query, "count": len(hits), "results": [
+            {"score": round(score, 5), "title": r["title"], "date": r["updated"], "base": r["source"], "space": r["space"], "path": r["path"],
+             "chunk": r["chunk"], "text": r["text"]} for score, r in hits]})
+    search.show(hits, a.full)
+
+
+def journal_tail(guard, a):
+    recs = guard.journal.tail(a.n, a.client)
+    if a.json:
+        return emit(recs)
+    if not recs:
+        print("Журнал пуст.")
+        return
+    for r in recs:
+        params = " ".join(f"{k}={v}" for k, v in r.get("params", {}).items())
+        via = f" через {r['via']}" if r.get("via") else ""
+        print(f"{local_time(r['ts'])}  {r['client']:<14} {r['server']:<7} {r['tool']:<16} "
+              f"{r['status']}  {r['outcome']}{via}  {params}"[:240])
+
+
+def check(guard, a):
+    """Разбор пачки в папку. Источник не изменяется, в архив и индекс ничего не попадает."""
+    import intake
+    import unpack
+    d = unpack.Limits()
+    limits = unpack.Limits(max_bytes=int(a.max_gb * 1024 ** 3) if a.max_gb else d.max_bytes,
+                           max_files=a.max_files or d.max_files, max_ratio=a.max_ratio or d.max_ratio,
+                           max_depth=a.depth or d.max_depth)
+    archive = None
+    if not a.without_archive:
+        import known
+        archive = known.Known()
+        info = archive.info()
+        if info is None:
+            raise auth.AuthError(messages.make("known.not_built"))
+        print(f"Сверка с архивом: в базе файлов {info['files']}, писем {info['mail']}, собрана {info['built']}")
+    llm = None
+    if a.llm:
+        import llm_check
+        llm = llm_check.from_env(cloud=not a.no_cloud)
+        spare = (f"запасная — {llm.fallback.name}, облако: текст документа уйдёт с машины" if llm.fallback
+                 else "запасной нет: непроверенное пойдёт на утверждение")
+        local = llm.local.name or f"недоступна ({messages.make('llm.not_configured')})"  # имя не задано: причина названа
+        print(f"Проверка моделью: {local}; {spare}")
+
+    def llm_progress(n, total):
+        if n % 25 == 0 or n == total:
+            print(f"моделью проверено: {n} из {total}", file=sys.stderr, flush=True)
+
+    import inbox
+    names, root_names = inbox.service_patterns(inbox.load_config(tokens.HOME))      # те же имена служебных файлов, что у разбора входящих
+    try:
+        result = intake.run(a.source, a.into, limits=limits, jobs=a.jobs, archive=archive,
+                            llm=llm, llm_jobs=a.llm_jobs, llm_progress=llm_progress,
+                            progress=lambda n: print(f"проверено файлов: {n}", file=sys.stderr, flush=True),
+                            service_names=names, service_root_names=root_names)
+    except intake.IntakeError as e:
+        raise auth.AuthError(messages.of(e))
+    print(f"Разбор закончен за {result.seconds:.0f} с.")
+    for key, title in intake.TITLES.items():
+        if result.counts.get(key):
+            print(f"  {title}: {result.counts[key]}")
+    print(f"Отчёт: {result.report_md}")
+    print(f"Подробно по каждому файлу: {result.report_jsonl}")
+
+
+def known_build(guard, a):
+    """База известного: sha256 каждого файла корпуса, Message-ID и отпечаток каждого письма."""
+    import known
+    stats = known.build(jobs=a.jobs, progress=lambda n, total: print(f"прочитано {n} из {total}", file=sys.stderr, flush=True))
+    print(f"База известного собрана за {stats['seconds']:.0f} с: файлов: {stats['files']}, писем: {stats['mail']}, "
+          f"прочитано заново: {stats['added']}, убрано: {stats['removed']}")
+    for package, count in stats["missing"].items():          # письма, ключи которых не прочитаны без библиотеки: молчаливой потери нет
+        print(f"замечание: {messages.make('known.mail_not_read', count=count, package=package)}", file=sys.stderr)
+
+
+def known_status(guard, a):
+    import known
+    info = known.Known().info()
+    if info is None:
+        print("База известного не построена. Выполни: flyarchive known build")
+        return
+    print(f"База известного: файлов: {info['files']}, писем: {info['mail']}, собрана {info['built']}, корпус {info['corpus']}")
+
+
+def index_dedupe(guard, a):
+    """Повторы в индексе: одно письмо из нескольких выгрузок, одинаковые вложения. Файлы корпуса не трогаются."""
+    import ingest
+    lancedb = ingest.require_lancedb()                    # нет библиотеки индекса — отказ с кодом раньше всего остального
+    import known
+    if known.Known().info() is None:
+        raise auth.AuthError(messages.make("cli.known_for_dedupe"))
+    import dedupe_index
+    index_dir = os.path.join(tokens.HOME, "index")
+    table = lancedb.connect(os.path.join(index_dir, "lance")).open_table("docs")
+    counts, dates = dedupe_index.index_meta(table)
+    plan = dedupe_index.plan(counts, known.DB, dates=dates)
+    rows = sum(counts[p] for p in plan.drop)
+    total = sum(counts.values())
+    print(f"В индексе фрагментов: {total}, путей: {len(counts)}")
+    print(f"Повторы: убрать путей: {len(plan.drop)} (писем {plan.letters}, файлов почты {plan.files}, "
+          f"двойная запись {plan.same_file}), фрагментов: {rows}")
+    print(f"Вне почты, не трогается: {plan.outside} путей. Нет в корпусе: {plan.unknown} путей.")
+    if not plan.drop:
+        print("Повторов нет, чистить нечего.")
+        return
+    if not a.apply:
+        print("Ничего не изменено. Чтобы убрать повторы из индекса, добавь ключ --apply")
+        return
+    listing = os.path.join(index_dir, "dedupe-dropped-" + time.strftime("%Y-%m-%d-%H%M%S") + ".txt")
+    with os.fdopen(os.open(listing, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w", encoding="utf-8") as f:       # права — при создании, не по маске
+        f.write("\n".join(plan.drop) + ("\n" if plan.drop else ""))
+    deleted = dedupe_index.apply(table, plan.drop,
+                                 progress=lambda n, of: print(f"убрано путей: {n} из {of}", file=sys.stderr, flush=True))
+    print(f"Готово: удалено фрагментов: {deleted}, осталось: {table.count_rows()}")
+    print(f"Список убранных путей: {listing}")
+
+
+def index_dates(guard, a):
+    """Письмам — дата из заголовка Date, вложениям — дата того, к чему они приложены."""
+    import ingest
+    lancedb = ingest.require_lancedb()                    # нет библиотеки индекса — отказ с кодом раньше всего остального
+    import known
+    if known.Known().info() is None:
+        raise auth.AuthError(messages.make("cli.known_for_dates"))
+    import fix_dates
+    index_dir = os.path.join(tokens.HOME, "index")
+    live, fresh = os.path.join(index_dir, "lance"), os.path.join(index_dir, "lance.new")
+    current = fix_dates.index_dates(lancedb.connect(live).open_table("docs"))
+    plan = fix_dates.plan(current, known.DB)
+    print(f"В индексе путей: {len(current)}")
+    print(f"Даты: поменять дату у путей: {len(plan.new)} (писем {plan.letters}, вложений по письму, задаче или странице "
+          f"{plan.by_parent}, вложений по имени каталога {plan.by_name})")
+    print(f"Дата уже верна: {plan.same}. Дату взять неоткуда: {plan.unknown}.")
+    if not plan.new:
+        print("Менять нечего.")
+        return
+    if not a.apply:
+        print("Ничего не изменено. Чтобы поставить даты, добавь ключ --apply")
+        return
+    try:
+        rows = fix_dates.rewrite(live, fresh, plan.new, log=lambda m: print(m, file=sys.stderr, flush=True))
+    except fix_dates.DatesError as e:
+        raise auth.AuthError(messages.of(e))
+    kept = os.path.join(index_dir, "lance.before-dates-" + time.strftime("%Y-%m-%d-%H%M%S"))
+    os.rename(live, kept)                         # поиск открывает каталог на каждый запрос и подхватит новый
+    os.rename(fresh, live)
+    print(f"Готово: строк {rows}, даты поставлены. Прежний индекс: {kept}")
+
+
+def index_optimize(guard, a):
+    """Поисковые индексы поверх таблицы: полнотекстовый заново, приближённый по векторам; с --compact — ещё уплотнение и уборка старых версий (FR-109).
+    Без ключа ничего не удаляется; видеокарта — только с --gpu. Код — в index_optimize.py. Нет таблицы — отказ index.no_table, таблица не заводится."""
+    import index_optimize as optimize
+    import ingest
+    ingest.require_lancedb()                              # нет библиотеки индекса — отказ с кодом раньше всего остального
+    said = []
+
+    def say(message):
+        said.append(message)
+        if not a.json:
+            print(message, flush=True)
+
+    result = optimize.run(tokens.HOME, compact=a.compact, gpu=a.gpu, say=say)
+    if a.json:
+        return emit({**result, "messages": [m.to_json() for m in said]})
+
+
+def _review(fn, *args, **kw):
+    import review
+    try:
+        return fn(review)(tokens.HOME, *args, **kw)
+    except review.ReviewError as e:
+        raise auth.AuthError(messages.of(e))
+
+
+def _items(items, empty):
+    if not items:
+        print(empty)
+        return
+    for it in items:
+        first = it["findings"][0] if it["findings"] else {"rule": "", "level": "", "quote": it["reason"]}
+        print(f"{it['path']}  {it['size']} байт, баллов: {it['score']}; {first['rule']} {first['level']}: {first['quote']}"[:240])
+
+
+def queue_list(guard, a):
+    items = _review(lambda r: r.queue_list)
+    return emit(items) if a.json else _items(items, "Очередь утверждения пуста.")
+
+
+def _batch(a, act):
+    """{"results": [...]}: решение act(review, путь) по каждому пути команды; отказ всего списка — до первого действия."""
+    import review
+    try:
+        return review.decide_many(a.paths, lambda path: act(review, path))
+    except review.ReviewError as e:
+        raise auth.AuthError(messages.of(e))
+
+
+def _decide(a, act, say):
+    """Решение по путям команды. С --json и «--» перед путями (или с несколькими путями) ответ — {"results": [...]} и код возврата 0,
+    даже если какой-то путь не удался. Один путь без «--» — прежний ответ и прежний отказ. Без --json несколько путей —
+    по строке на путь, сбой — строкой в stderr и код возврата 1. say(ответ) — строка для человека."""
+    import review
+    if a.json and (a.dashdash or len(a.paths) > 1):
+        return emit(_batch(a, act))
+    if len(a.paths) == 1:
+        try:
+            r = act(review, a.paths[0])
+        except review.ReviewError as e:
+            raise auth.AuthError(messages.of(e))
+        return emit(r) if a.json else print(say(r))
+    failed = 0
+    for row in _batch(a, act)["results"]:
+        if row["ok"]:
+            print(say({**{k: v for k, v in row.items() if k not in ("path", "ok", "to")}, **({"path": row["to"]} if "to" in row else {})}))
+        else:
+            failed += 1
+            print(f"ошибка: {row['path']}: {row['error']['text']}", file=sys.stderr)
+    return 1 if failed else 0
+
+
+def queue_accept(guard, a):
+    """Принять документы из очереди. С --defer-index индексацию команда не ждёт: долг записан, разбор запускает служба, один раз на команду.
+    Нет службы или разбор уже идёт — не ошибка: долг уйдёт со следующим проходом."""
+    taken, noted = [], set()
+
+    def act(r, path):
+        done = r.queue_accept(tokens.HOME, path, defer_index=a.defer_index)
+        taken.append(path)
+        for note in done.get("notes", ()):                     # письмо принято, а читать его нечем (нет библиотеки): причина названа один раз за команду
+            if not a.json and note["text"] not in noted:
+                noted.add(note["text"])
+                print(f"замечание: {note['text']}", file=sys.stderr)
+        return done
+
+    code = _decide(a, act, lambda r: f"Документ принят: {r['path']}" + ("" if r["indexed"] else ". В индекс он попадёт следующим разбором."))
+    if a.defer_index and taken:
+        import inbox
+        try:
+            inbox.start_service()
+        except inbox.InboxError as e:
+            if not a.json:                          # плагин читает только ответ; человеку — замечание
+                print(f"замечание: {e}", file=sys.stderr)
+    return code
+
+
+def queue_quarantine(guard, a):
+    return _decide(a, lambda r, path: r.queue_reject(tokens.HOME, path), lambda r: f"Документ в карантине: {r['path']}")
+
+
+def quarantine_list(guard, a):
+    items = _review(lambda r: r.quarantine_list)
+    return emit(items) if a.json else _items(items, "Карантин пуст.")
+
+
+def quarantine_delete(guard, a):
+    r = _review(lambda r: r.quarantine_delete, a.path)
+    return emit(r) if a.json else print(f"Стёрто: {r['deleted']}")
+
+
+def quarantine_return(guard, a):
+    return _decide(a, lambda r, path: r.quarantine_return(tokens.HOME, path), lambda r: f"Возвращено в папку возврата: {r['returned']}")
+
+
+def doc_delete(guard, a):
+    if not a.yes:
+        raise auth.AuthError(messages.make("cli.confirm_needed"))
+    r = _review(lambda r: r.doc_delete, a.path)
+    _forget_vision(r, a)
+    if a.json:
+        return emit(r)
+    print(f"Документ убран из архива: строк индекса {r['rows']}, файл перенесён в {r['moved_to']}")
+
+
+def _forget_vision(deleted, a):
+    """Документ убран из архива: строки индекса review уже убрал (фрагменты описания — те же строки по path), здесь — файл описания и долги описания.
+    Описание остаётся, если то же содержимое лежит в корпусе под другим путём. Сбой не отменяет удаления: он называется в stderr."""
+    import gate
+    import inbox
+    import known
+    home = tokens.HOME
+    try:
+        sha = gate.sha256_of(os.path.join(home, *deleted["moved_to"].split("/")))
+        twin = known.Known(os.path.join(home, "index", "known.sqlite")).find(sha256=sha)
+        inbox.forget_vision(home, sha, rel=a.path.replace("\\", "/"), keep=twin is not None)
+    except Exception as e:
+        if not getattr(a, "json", False):
+            print(f"замечание: файл описания не убран ({type(e).__name__})", file=sys.stderr)
+
+
+def connect_harness(guard, a):
+    """Готовая настройка MCP для оболочки модели: адрес и имя переменной с токеном. Токена в настройке нет."""
+    import connect
+    try:
+        print(connect.guide(a.harness, connect.address(a.remote), a.env, a.remote))
+    except connect.ConnectError as e:
+        raise auth.AuthError(messages.of(e))
+
+
+def _switch(value, name):
+    if value not in ("on", "off"):
+        raise auth.AuthError(messages.make("cli.bad_switch", name=name))
+    return value == "on"
+
+
+def _service_line(s):
+    """Строка о шаблонах имён служебных файлов для `inbox set` и `inbox status`; s — настройка или состояние (оба несут два списка)."""
+    names, roots = s.get("service_names") or [], s.get("service_root_names") or []
+    if not names and not roots:
+        return "Служебные имена файлов: не заданы, по имени ничего не пропускается."
+    parts = [f"{where} — {', '.join(items)}" for where, items in (("в любой папке", names), ("только в корне", roots)) if items]
+    return "Служебные имена файлов (такие файлы пропускаются): " + "; ".join(parts) + "."
+
+
+def _fate_line(s):
+    """Строка о судьбе пропущенных служебных файлов и описаний писем для `inbox set` и `inbox status`."""
+    if s.get("service_fate") == "delete":
+        return "Служебные файлы по шаблонам и описания писем (service_fate): delete — убираются из входящей папки, в папку возврата не идут."
+    return "Служебные файлы по шаблонам и описания писем (service_fate): return — возвращаются в папку возврата."
+
+
+def inbox_set(guard, a):
+    """Настройка входящих: папка, период разбора, проверка моделью. Без ключей — применить текущую заново."""
+    import inbox
+    home = tokens.HOME
+    cfg = inbox.load_config(home)
+    old = cfg["inbox"]
+    new = os.path.abspath(os.path.expanduser(a.path)) if a.path else old
+    must_exist = getattr(a, "must_exist", False)     # прежние вызовы без этого ключа работают как раньше
+    watched = must_exist and bool(a.path)         # смена папки из плагина идёт в журнал обращений: старый и новый адрес
+
+    def refused(e):
+        if watched:
+            audit(guard, "inbox set", {"old": old, "new": new}, e)
+        return auth.AuthError(messages.of(e))
+
+    if a.path:
+        if must_exist:                            # каталога нет — отказ: ничего не создано, настройка и таймер не тронуты
+            try:
+                inbox.require_folder(new)
+            except inbox.InboxError as e:
+                raise refused(e)
+        cfg["inbox"] = new
+    if a.period is not None:
+        cfg["period"] = a.period
+    if a.llm is not None:
+        cfg["llm"] = _switch(a.llm, "llm")
+    if a.cloud is not None:
+        cfg["cloud"] = _switch(a.cloud, "cloud")
+    if getattr(a, "vision", None) is not None:
+        cfg["vision"] = _switch(a.vision, "vision")
+    for key, value in (("threshold", a.threshold), ("max_gb", a.max_gb), ("max_files", a.max_files),
+                       ("max_ratio", a.max_ratio), ("depth", a.depth), ("vision_pages", getattr(a, "vision_pages", None)),
+                       ("vision_minutes", getattr(a, "vision_minutes", None))):
+        if value is not None:
+            cfg[key] = int(value) if key == "max_gb" and float(value).is_integer() else value
+    for key, given in (("service_names", getattr(a, "service_name", None)), ("service_root_names", getattr(a, "service_root_name", None))):
+        if given is not None:                     # ключ задан — список заменяется целиком; пустое значение очищает его
+            cfg[key] = [value.strip() for value in given if value.strip()]
+    if getattr(a, "service_fate", None) is not None:        # return или delete; негодное значение отклоняет check_config
+        cfg["service_fate"] = a.service_fate
+    try:
+        inbox.save_config(home, cfg)
+    except inbox.InboxError as e:
+        raise refused(e)
+    if watched and new != old:
+        audit(guard, "inbox set", {"old": old, "new": new})
+    skip_timer = getattr(a, "no_timer", False)       # человек «только пробует»: настройки сохранены, таймер не ставится и systemd не зовётся
+    trouble = None if skip_timer else inbox.install_timer(home, cfg["period"])
+    if getattr(a, "json", False):
+        return emit({**cfg, "vision": inbox.vision_wanted(cfg), "timer_error": trouble.to_json() if trouble else None,
+                     **({"timer_skipped": True} if skip_timer else {})})
+    print(f"Входящая папка: {cfg['inbox']}")
+    when = f"Разбор — вручную; период {cfg['period']} мин записан на будущее." if skip_timer else f"Разбор каждые {cfg['period']} мин."
+    print(f"{when} Проверка моделью: {'да' if cfg['llm'] else 'нет'}; "
+          f"запасная облачная модель: {'да' if cfg['llm'] and cfg['cloud'] else 'нет'}.")
+    print(f"Описание изображений: {'да' if inbox.vision_wanted(cfg) else 'нет'} (картинки и сканы без текста, только локальная модель; "
+          f"за проход до {cfg['vision_pages']} страниц и {cfg['vision_minutes']} минут).")
+    print(f"Порог {cfg['threshold']} баллов. Пределы архива: {cfg['max_gb']} ГБ, {cfg['max_files']} файлов, "
+          f"сжатие {cfg['max_ratio']} к 1, вложенность {cfg['depth']}.")
+    print(_service_line(cfg))
+    print(_fate_line(cfg))
+    if skip_timer:
+        print(messages.make("inbox.timer_skipped"))
+    if trouble:
+        print(f"Таймер не включён: {trouble}", file=sys.stderr)
+
+
+def inbox_run(guard, a):
+    """Один проход по входящей папке — то же, что делает таймер."""
+    import inbox
+    import intake
+    home = tokens.HOME
+    cfg = inbox.load_config(home)
+    checker = None
+    if cfg["llm"]:
+        import llm_check
+        checker = llm_check.from_env(cloud=cfg["cloud"])
+    describer = None
+    if inbox.vision_wanted(cfg):                    # описание картинок: только локальная модель, облачная точка здесь не собирается вовсе
+        import vision
+        describer = vision.from_env()
+
+    names, root_names = inbox.service_patterns(cfg)
+
+    def once():
+        return inbox.process(home, cfg["inbox"], checker=checker, stable_seconds=cfg["stable_seconds"],
+                             jobs=min(8, os.cpu_count() or 1), threshold=cfg["threshold"], limits=inbox.limits_of(cfg),
+                             vision=describer, vision_pages=cfg["vision_pages"], vision_minutes=cfg["vision_minutes"],
+                             service_names=names, service_root_names=root_names, service_fate=inbox.service_fate(cfg))
+
+    try:
+        s = once()
+        if s.batch is None and a.wait and inbox.status(home)["waiting"]:
+            time.sleep(cfg["stable_seconds"] + 1)           # только что положенный файл должен отстояться
+            s = once()
+    except inbox.Busy:
+        print("Разбор входящих уже идёт — этот запуск пропущен.")
+        return 0
+    except inbox.InboxError as e:
+        raise auth.AuthError(messages.of(e))
+    for p in s.problems:
+        print(f"замечание: {p}", file=sys.stderr)
+    if s.batch is None:
+        print("Разбирать нечего: во входящей папке нет файлов, которые перестали меняться.")
+        return 0
+    print(f"Пачка {s.batch}:")
+    for key, title in intake.TITLES.items():
+        if s.counts.get(key):
+            print(f"  {title}: {s.counts[key]}")
+    print(f"Квитанции: {s.receipts}")
+    return 0
+
+
+def inbox_kick(guard, a):
+    """Запускает разбор службой и сразу возвращается: кнопке «разобрать сейчас» незачем ждать конца."""
+    import inbox
+    try:
+        inbox.start_service()
+    except inbox.InboxError as e:
+        raise auth.AuthError(messages.of(e))
+    if a.json:
+        return emit({"started": True})
+    print("Разбор запущен. Итог — в flyarchive inbox status.")
+
+
+def inbox_status(guard, a):
+    import inbox
+    s = inbox.status(tokens.HOME)
+    if a.json:
+        return emit(s)
+    print(f"Входящая папка: {s['inbox']}")
+    print(f"Разбор каждые {s['period']} мин, таймер {'включён' if s['timer'] else 'не поставлен'}. "
+          f"Проверка моделью: {'да' if s['llm'] else 'нет'}; запасная облачная: {'да' if s['llm'] and s['cloud'] else 'нет'}.")
+    print(_service_line(s))
+    print(_fate_line(s))
+    print(f"Ждёт разбора: {s['waiting']}. В очереди утверждения: {s['queue']}. В карантине: {s['quarantine']}. "
+          f"Ждёт индексации: {s['pending']}. Ждёт описания: {s['vision_pending']}.")
+    if s["last_batch"]:
+        counts = ", ".join(f"{k} {v}" for k, v in s["last_batch"].items() if k not in ("batch", "time"))
+        print(f"Последняя пачка: {s['last_batch']['batch']} — {counts}.")
+
+
+def _when(stamp):
+    """Время записи (UTC) для таблицы: 2026-10-04T12:00:00Z -> 2026-10-04 12:00:00."""
+    return str(stamp).replace("T", " ").replace("Z", "") if stamp else "—"
+
+
+def _table(head, rows):
+    """Строки таблицы: каждый столбец, кроме последнего, по ширине самой длинной ячейки."""
+    cells = [head] + rows
+    width = [max(len(r[i]) for r in cells) for i in range(len(head) - 1)]
+    return ["  ".join(c.ljust(w) for c, w in zip(r, width)) + "  " + r[-1] for r in cells]
+
+
+def inbox_batches(guard, a):
+    """История пачек разбора, от новой к старой (FR-70)."""
+    import batches
+    import intake
+    try:
+        r = batches.list_batches(tokens.HOME, a.limit, a.before)
+    except batches.BatchError as e:
+        raise auth.AuthError(messages.of(e))
+    if a.json:
+        return emit(r)
+    if not r["batches"]:
+        print("Пачек пока нет.")
+        return
+    rows = [[b["id"], _when(b["time"]), "—" if b["seconds"] is None else str(b["seconds"]), str(b["files"]), str(b["problems"]),
+             ", ".join(f"{intake.TITLES.get(k, k)}: {v}" for k, v in b["counts"].items())] for b in r["batches"]]
+    print("\n".join(_table(["Пачка", "Время (UTC)", "Секунд", "Файлов", "Замечаний", "Итог"], rows)))
+    if r["more"]:
+        print(f"Есть более старые пачки: flyarchive inbox batches --before {r['batches'][-1]['id']}")
+
+
+WHERE = {"corpus": "в архиве", "queue": "в очереди", "quarantine": "в карантине", "returned": "возвращён в папку возврата",
+         "deleted": "стёрт", "missing": "нет на месте", None: "не хранится"}
+DECIDED = {"accept": "принят", "quarantine": "отправлен в карантин", "return": "возвращён", "delete": "стёрт"}
+
+
+def inbox_batch(guard, a):
+    """Одна пачка: что с каждым файлом и где он сейчас (FR-70)."""
+    import batches
+    import intake
+    import inbox
+    try:
+        d = batches.batch_detail(tokens.HOME, a.id)
+    except batches.BatchError as e:
+        raise auth.AuthError(messages.of(e))
+    for f in d["files"]:            # квитанция пишется до описания и не меняется: живое состояние описания берётся из его файла и долгов (FR-92)
+        # по отпечатку документа, а не по отметке в квитанции: документ мог проиндексироваться позже, из долгов. Дубликату
+        # (пути в корпусе нет) состояние описания чужого документа не показывается
+        if isinstance(f.get("sha256"), str) and (isinstance(f.get("vision"), dict) or isinstance(f.get("path"), str)):
+            live = inbox.vision_state(tokens.HOME, f["sha256"], f.get("path"))
+            if live is not None:
+                f["vision"] = live
+    if a.json:
+        return emit(d)
+    took = "—" if d["seconds"] is None else f"{d['seconds']} с"
+    print(f"Пачка {d['id']}: {_when(d['time'])} UTC, длительность {took}, файлов {len(d['files'])}, замечаний {len(d['problems'])}.")
+    for p in d["problems"]:
+        print(f"  замечание: {p.get('text')}")
+    rows = []
+    for f in d["files"]:
+        said = f"; решение владельца: {DECIDED.get(f['decided'], f['decided'])}, {_when(f['decided_at'])}" if f["decided"] else ""
+        if isinstance(f.get("vision"), dict):
+            said += "; описан моделью, страниц: %s" % f["vision"].get("pages") if f["vision"].get("state") == "described" else "; ждёт описания"
+        rows.append([str(f.get("name")), intake.TITLES.get(f.get("decision"), str(f.get("decision"))), str(f.get("score")),
+                     WHERE.get(f["location"], str(f["location"])) + said])
+    for line in _table(["Файл", "Приёмка", "Баллы", "Где сейчас"], rows):
+        print(line)
+
+
+def _vision_limit(value, required):
+    """--limit команд vision: целое от 1 до предела. Нет ключа: у backfill это отказ (старое описывается только порциями), у run — без предела."""
+    import inbox
+    if value is None:
+        if required:
+            raise inbox.InboxError(messages.make("vision.limit_needed"))
+        return None
+    if not re.fullmatch(r"[0-9]{1,6}", str(value)) or not 1 <= int(value) <= inbox.VISION_MAX_LIMIT:
+        raise inbox.InboxError(messages.make("vision.bad_limit", max=inbox.VISION_MAX_LIMIT))
+    return int(value)
+
+
+def vision_run(guard, a):
+    """Отдать долги «ждёт описания» сейчас, не дожидаясь прохода. Модель — только локальная; настройка vision не спрашивается: команду зовёт владелец.
+    Пределы страниц и минут — из настройки, --limit — сколько документов. Модель недоступна — не ошибка: долги остаются, причина в замечании."""
+    import inbox
+    import vision
+    home = tokens.HOME
+    cfg = inbox.load_config(home)
+    limit = _vision_limit(a.limit, required=False)
+    run = inbox.hand_out_vision(home, vision.from_env(), pages=cfg["vision_pages"], minutes=cfg["vision_minutes"], limit=limit)
+    if a.json:
+        return emit({"documents": run.documents, "pages": run.pages, "waiting": run.waiting, "busy": run.busy,
+                     "stopped": run.stopped.to_json() if run.stopped else None, "problems": [p.to_json() for p in run.problems]})
+    if run.busy:
+        print("Описание уже идёт — этот запуск пропущен.")
+        return 0
+    for p in run.problems:
+        print(f"замечание: {p}", file=sys.stderr)
+    if not run.documents and not run.waiting and not run.problems:
+        print("Описывать нечего: долгов описания нет.")
+        return 0
+    print(f"Описано документов: {run.documents}, страниц: {run.pages}. Ждёт описания: {run.waiting}.")
+    return 0
+
+
+def vision_status(guard, a):
+    import inbox
+    import vision
+    home = tokens.HOME
+    cfg = inbox.load_config(home)
+    s = {"enabled": inbox.vision_wanted(cfg), "pending": len(inbox._read_pending(home, inbox.VISION_PENDING)), "described": vision.count(home),
+         "vision_pages": cfg["vision_pages"], "vision_minutes": cfg["vision_minutes"]}
+    if a.json:
+        return emit(s)
+    print(f"Описание изображений: {'да' if s['enabled'] else 'нет'}. Ждёт описания: {s['pending']}. Описано документов: {s['described']}. "
+          f"За проход: до {s['vision_pages']} страниц и {s['vision_minutes']} минут.")
+
+
+def vision_backfill(guard, a):
+    """Старые документы корпуса без текста в индексе (картинки и PDF) — долгами «ждёт описания»; модель не зовётся, описывает их `vision run`
+    или проход. Без --limit команда не работает: старое описывается только по команде владельца и порциями."""
+    import inbox
+    import ingest
+    limit = _vision_limit(a.limit, required=True)
+    ingest.require_lancedb()                              # документы без текста ищутся по индексу: нет библиотеки — отказ с кодом, а не трассировка
+    r = inbox.backfill_vision(tokens.HOME, limit, source=a.source, dry_run=a.dry_run)
+    if a.json:
+        return emit(r)
+    tail = "Пробный запуск, ничего не записано." if r["dry_run"] else f"Записано долгов описания: {r['added']}. Описать их: flyarchive vision run"
+    print(f"Найдено документов без текста в индексе: {r['candidates']}; выбрано: {len(r['files'])}. {tail}")
+
+
+def _preview_text(answer):
+    """Описание просмотра для человека: сведения о файле и то, что в нём нашлось."""
+    meta = answer.get("meta") or {}
+    kind = answer["kind"]
+    if kind == "rendering":
+        return "Файл ещё обрабатывается другим запросом: повтори позже."
+    lines = [f"Файл: {meta.get('name')} ({meta.get('type') or 'тип не определён'}), {meta.get('size')} байт, sha256 {meta.get('sha256')}"]
+    if kind == "text":
+        lines += [answer["text"]] + (["… текст обрезан: показаны первые знаки"] if answer["truncated"] else [])
+    elif kind == "pages":
+        lines.append(f"Страниц: {answer['pages']}, показано: {answer['shown']}. Страница в PNG: flyarchive preview page --area … -- путь НОМЕР")
+    elif kind == "image":
+        lines.append("Картинка. В PNG: flyarchive preview page --area … -- путь 1")
+    elif kind == "mail":
+        mail = answer["mail"]
+        lines += [f"От: {mail['from'] or '—'}", f"Кому: {', '.join(mail['to']) or '—'}"]
+        lines += [f"Копия: {', '.join(mail['cc'])}"] if mail["cc"] else []
+        lines += [f"Дата: {mail['date'] or '—'}", f"Тема: {mail['subject'] or '—'}", "", mail["text"]]
+        lines += ["… текст обрезан: показаны первые знаки"] if mail["truncated"] else []
+        if mail["attachments"]:
+            lines.append("Вложения (открыть: flyarchive preview show --member НОМЕР --area … -- путь):")
+            for a in mail["attachments"]:
+                lines.append(f"  {a['member']}. {a['name']} ({a['type']}, {a['size']} байт)" + (" — программа" if a["executable"] else ""))
+    elif kind == "listing":
+        lines += ["Состав архива (ничего не распаковано):"] + [f"  {row['name']}  {row['size']} байт" for row in answer["listing"]]
+        lines += [f"… список обрезан: показаны первые {len(answer['listing'])} строк"] if answer["truncated"] else []
+    else:
+        lines.append(answer["note"]["text"])
+    return "\n".join(lines)
+
+
+def preview_show(guard, a):
+    """Что в файле очереди, карантина или корпуса. Файл непроверенный: его разбирает только рабочий процесс в песочнице без сети."""
+    import preview
+    import preview_container
+    preview_container.reap_later()
+    answer = preview.show(tokens.HOME, a.area, a.path, a.member)
+    return emit(answer) if a.json else print(_preview_text(answer))
+
+
+def preview_page(guard, a):
+    """Страница в PNG прямо в stdout. Отказ — код возврата 1, в stdout ничего, последняя строка stderr — {"error": …} (ключа --json нет)."""
+    import preview
+    import preview_container
+    preview_container.reap_later()
+    png = preview.page(tokens.HOME, a.area, a.path, a.number, a.member)
+    sys.stdout.flush()
+    sys.stdout.buffer.write(png)
+    sys.stdout.buffer.flush()
+
+
+def preview_clean(guard, a):
+    import preview
+    import preview_container
+    preview_container.reap_later()
+    done = preview.clean(tokens.HOME)
+    if a.json:
+        return emit(done)
+    print(f"Убрано: {done['removed']}, освобождено байт: {done['freed']}, в кэше осталось байт: {done['left']}.")
+
+
+def preview_setup(guard, a):
+    """Образ контейнера для Office, HTML и метафайлов: скачать, прочитать дайджест, записать в настройку просмотра (FR-78). Сеть — только здесь."""
+    import preview_container
+    if a.image is None and not a.json:
+        print(f"Скачиваю образ {preview_container.IMAGE_DEFAULT}: это может занять несколько минут…", flush=True)
+    done = preview_container.setup(tokens.HOME, a.image)
+    if a.json:
+        return emit(done)
+    print(f"Образ записан в настройку просмотра: {done['image']}" + (" (скачан)" if done["pulled"] else " (уже был скачан)"))
+
+
+PERMS_SHOWN = 20
+CODE_DIR = os.path.dirname(os.path.realpath(__file__))        # каталог, где лежит команда: код служб идёт отсюда, а проверка прав его не смотрит
+
+
+def perms_code_note():
+    """Чего проверка прав не охватывает: код лежит в каталоге репозитория, не в архиве, и закрыть его от записи другим нужно самому (tools/perms.py)."""
+    return f"Каталог кода ({CODE_DIR}) эта проверка не смотрит: закрой его от записи другим сам — chmod -R go-w {shlex.quote(CODE_DIR)}."
+
+
+def perms_check(guard, a):
+    """Закрыт ли архив от других пользователей машины."""
+    import perms
+    total = 0
+    try:
+        for p in perms.scan(tokens.HOME, deep=a.deep):
+            total += 1
+            if total <= PERMS_SHOWN:
+                print(f"  {p.path} — {p.text}")
+    except perms.PermsError as e:
+        raise auth.AuthError(messages.of(e))
+    if not total:
+        print("Права в порядке: архив закрыт от других пользователей.")
+        print(perms_code_note())
+        return 0
+    if total > PERMS_SHOWN:
+        print(f"  … и ещё {total - PERMS_SHOWN}")
+    print(f"Нарушений: {total}. Исправить: flyarchive perms fix" + (" --deep" if a.deep else ""))
+    return 1
+
+
+def perms_fix(guard, a):
+    import perms
+    try:
+        changed = perms.fix(tokens.HOME, deep=a.deep)
+        left = sum(1 for _ in perms.scan(tokens.HOME, deep=a.deep))
+    except perms.PermsError as e:
+        raise auth.AuthError(messages.of(e))
+    print(f"Исправлено: {changed}.")
+    if left:
+        print(f"Осталось нарушений: {left} — файлы другого владельца. Смотри: flyarchive perms check", file=sys.stderr)
+        return 1
+    print(perms_code_note())
+    return 0
+
+
+def run_sandboxed(guard, a):
+    """Оболочка внешней модели в песочнице: архива и домашнего каталога владельца она не видит."""
+    import sandbox
+    command = a.command[1:] if a.command[:1] == ["--"] else a.command
+    if not (1 <= len(a.name) <= 40 and all(ch.isalnum() or ch in "-_" for ch in a.name)):
+        raise auth.AuthError(messages.make("cli.bad_shell_name"))
+    owner_home = os.path.expanduser("~")
+    started = time.time()
+    try:
+        code = sandbox.run(command, workdir=a.dir, archive=tokens.HOME, owner_home=owner_home,
+                           state=os.path.join(SANDBOX_DIR, a.name), pass_env=a.env, ro=a.ro,
+                           protected=sandbox.read_protected(tokens.HOME), umask=getattr(a, "caller_umask", -1))
+    except sandbox.SandboxError as e:
+        raise auth.AuthError(messages.of(e))
+    guard.journal.write(server="sandbox", client=a.name, tool="run",
+                        params={"cmd": os.path.basename(command[0]), "dir": os.path.realpath(a.dir)},
+                        status=code, outcome="ok" if code == 0 else f"код возврата {code}",
+                        ms=int((time.time() - started) * 1000))
+    return code
+
+
+def main(argv=None):
+    p = argparse.ArgumentParser(prog="flyarchive", description="Команда архива: установка, токены, поиск, приём файлов, индекс, просмотр.")
+    p.add_argument("--version", action="version", version=f"{sources.PRODUCT} {version.VERSION}")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    doc = sub.add_parser("doctor", help="проверить окружение: библиотеки, программы, служба векторов, архив, модель; ничего не меняет и не создаёт")
+    doc.add_argument("--json", action="store_true", help="вывод для программ")
+    doc.set_defaults(fn=doctor_check)
+
+    ini = sub.add_parser("init", help="завести пустой архив: каталоги, служебный токен, база сверки, таблица индекса; готовое не трогается")
+    ini.add_argument("--json", action="store_true", help="вывод для программ")
+    ini.set_defaults(fn=init_archive)
+
+    ins = sub.add_parser("install", help="поставить всё: архив, службы и таймер из шаблонов, плагин, файл настройки оболочки, запуск служб")
+    ins.add_argument("--dry-run", action="store_true", help="показать, что будет записано и запущено, и ничего не трогать")
+    ins.add_argument("--no-start", action="store_true", help="записать файлы, но systemctl не звать")
+    ins.add_argument("--no-plugin", action="store_true", help="не трогать профиль оболочки: плагин не ставить")
+    ins.add_argument("--no-dsh", action="store_true", help="не ставить службу оболочки DSH и плагин, даже если dsh есть в PATH (без dsh в PATH они не ставятся и так)")
+    ins.add_argument("--gateway", choices=("auto", "off"), help="auto — спросить адрес и имя узла у частной сети и дописать недостающие настройки; "
+                                                              "off — шлюз не ставить и не спрашивать")
+    ins.add_argument("--json", action="store_true", help="вывод для программ")
+    ins.set_defaults(fn=install_system)
+
+    tok = sub.add_parser("token", help="токены клиентов").add_subparsers(dest="action", required=True)
+    add = tok.add_parser("add", help="выпустить токен")
+    add.add_argument("name", help="имя клиента: ноутбук, планшет, ассистент-на-работе")
+    add.add_argument("--level", choices=("read", "full"), default="read")
+    add.add_argument("--days", type=int, help="срок действия в днях; без него токен бессрочный")
+    add.set_defaults(fn=token_add)
+    lst = tok.add_parser("list", help="список токенов")
+    lst.set_defaults(fn=token_list)
+    rev = tok.add_parser("revoke", help="отозвать токен")
+    rev.add_argument("name")
+    rev.set_defaults(fn=token_revoke)
+    tok.add_parser("init-local", help="служебный токен локального DSH").set_defaults(fn=token_init_local)
+
+    sub.add_parser("open", help="ссылка входа на страницу поиска").set_defaults(fn=open_page)
+    sr = sub.add_parser("search", help="найти документы в архиве: тот же поиск, что у страницы и у tools/search.py")
+    sr.add_argument("query", metavar="ЗАПРОС", help="запрос обычными словами")
+    sr.add_argument("-k", type=int, default=10, help="сколько находок показать (по умолчанию 10)")
+    sr.add_argument("--source", help="база или несколько через запятую")
+    sr.add_argument("--since", help="дата в формате ГГГГ, ГГГГ-ММ или ГГГГ-ММ-ДД")
+    sr.add_argument("--space", help="раздел базы: каталог первого уровня, ящик или номер пачки, можно через запятую")
+    sr.add_argument("--today", type=int, help="ГГГГММДД для веса свежести; по умолчанию сегодня")
+    sr.add_argument("--full", action="store_true", help="печатать текст фрагмента целиком")
+    sr.add_argument("--json", action="store_true", help="вывод для программ")
+    sr.set_defaults(fn=search_archive)
+    jr = sub.add_parser("journal", help="последние обращения к архиву")
+    jr.add_argument("-n", type=int, default=30)
+    jr.add_argument("--client")
+    jr.set_defaults(fn=journal_tail)
+    for one in (add, lst, rev, jr):
+        one.add_argument("--json", action="store_true", help="вывод для программ")
+
+    chk = sub.add_parser("check", help="разобрать пачку в папку: распаковка, приёмка, отчёт")
+    chk.add_argument("source", help="файл, архив или каталог; не изменяется")
+    chk.add_argument("--into", required=True, help="пустой каталог для разбора, вне корпуса")
+    chk.add_argument("--max-gb", type=float, help="предел распакованного объёма на архив, ГБ (по умолчанию 2)")
+    chk.add_argument("--max-files", type=int, help="предел числа файлов на архив (по умолчанию 5000)")
+    chk.add_argument("--max-ratio", type=int, help="предел сжатия (по умолчанию 100 к 1)")
+    chk.add_argument("--depth", type=int, help="предел вложенности архивов (по умолчанию 3)")
+    chk.add_argument("--jobs", type=int, default=min(8, os.cpu_count() or 1), help="сколько процессов проверяют файлы")
+    chk.add_argument("--without-archive", action="store_true",
+                     help="не сверять с архивом: дубликаты ищутся только внутри пачки")
+    chk.add_argument("--llm", action="store_true",
+                     help="проверить моделью то, что прошло правила: локальной, а если она молчит 180 секунд — запасной")
+    chk.add_argument("--no-cloud", action="store_true", help="без запасной облачной модели: текст с машины не уходит")
+    chk.add_argument("--llm-jobs", type=int, default=4, help="сколько документов модель читает разом (по умолчанию 4)")
+    chk.set_defaults(fn=check)
+
+    kn = sub.add_parser("known", help="база известного: что уже лежит в архиве").add_subparsers(dest="action", required=True)
+    kb = kn.add_parser("build", help="собрать или обновить по корпусу")
+    kb.add_argument("--jobs", type=int, default=min(16, os.cpu_count() or 1))
+    kb.set_defaults(fn=known_build)
+    kn.add_parser("status", help="состояние базы").set_defaults(fn=known_status)
+
+    ix = sub.add_parser("index", help="обслуживание индекса").add_subparsers(dest="action", required=True)
+    dd = ix.add_parser("dedupe", help="убрать из индекса повторы писем и файлов почты")
+    dd.add_argument("--apply", action="store_true", help="без ключа только считает, с ключом удаляет")
+    dd.set_defaults(fn=index_dedupe)
+    dt = ix.add_parser("dates", help="поставить настоящие даты письмам и вложениям")
+    dt.add_argument("--apply", action="store_true", help="без ключа только считает, с ключом переписывает индекс")
+    dt.set_defaults(fn=index_dates)
+    op = ix.add_parser("optimize", help="построить поисковые индексы поверх таблицы; с --compact — ещё уплотнить таблицу")
+    op.add_argument("--compact", action="store_true",
+                    help="плюс уплотнить фрагменты и убрать старые версии таблицы: не делать при идущей записи; при идущем разборе входящих откажет")
+    op.add_argument("--gpu", action="store_true", help="строить приближённый индекс на видеокарте (без ключа видеокарта не используется никогда)")
+    op.add_argument("--json", action="store_true", help="вывод для программ")
+    op.set_defaults(fn=index_optimize)
+
+    ib = sub.add_parser("inbox", help="входящая папка: пополнение архива").add_subparsers(dest="action", required=True)
+    st = ib.add_parser("set", help="папка, период разбора, проверка моделью; без ключей — включить таймер заново")
+    st.add_argument("--path", help="входящая папка; не внутри архива")
+    st.add_argument("--must-exist", action="store_true",
+                    help="папка уже должна быть (не корень и не домашний каталог): не создаётся, смена идёт в журнал")
+    st.add_argument("--json", action="store_true", help="вывод для программ")
+    st.add_argument("--period", type=int, help="разбор каждые 1, 5, 10, 30 или 60 минут")
+    st.add_argument("--llm", help="проверка моделью: on или off")
+    st.add_argument("--cloud", help="запасная облачная модель, когда локальная молчит: on или off")
+    st.add_argument("--threshold", type=int, help="порог баллов: до него документ принимается, выше — в очередь (0–100)")
+    st.add_argument("--max-gb", type=float, help="предел распакованного объёма архива, ГБ")
+    st.add_argument("--max-files", type=int, help="предел числа файлов в архиве")
+    st.add_argument("--max-ratio", type=int, help="предел сжатия, к одному")
+    st.add_argument("--depth", type=int, help="предел вложенности архивов")
+    st.add_argument("--vision", help="описание картинок и сканов без текста локальной моделью со зрением: on или off (пока не задано — как --llm)")
+    st.add_argument("--vision-pages", type=int, help="сколько страниц описывать за проход (1–1000, по умолчанию 60)")
+    st.add_argument("--vision-minutes", type=int, help="сколько минут описывать за проход (1–240, по умолчанию 10)")
+    st.add_argument("--service-name", action="append", metavar="ШАБЛОН",
+                    help="имя служебного файла в любой папке (как в fnmatch, без учёта регистра; образец: '*.tmp' или '*.bak' — файлы-спутники выгрузок, "
+                         "которые в архиве не нужны): такой файл пропускается, а что с ним станет — решает --service-fate (по умолчанию возвращается); "
+                         "ключ можно повторить; задаёт список целиком, пустое значение очищает; по умолчанию имён нет")
+    st.add_argument("--service-root-name", action="append", metavar="ШАБЛОН",
+                    help="то же, но только в корне входящей папки или архива (образец: 'index.*'); пустое значение очищает список")
+    st.add_argument("--service-fate", metavar="return|delete",
+                    help="судьба файлов, пропущенных по шаблонам имён, и описаний писем: return (по умолчанию) — вернуть в папку возврата, delete — убрать; "
+                         "пустые файлы и следы систем (__MACOSX, .DS_Store, Thumbs.db, desktop.ini) убираются всегда")
+    st.add_argument("--no-timer", action="store_true",
+                    help="только сохранить настройки: служба и таймер разбора не пишутся, systemctl не зовётся; разбор — flyarchive inbox run")
+    st.set_defaults(fn=inbox_set)
+    rn = ib.add_parser("run", help="разобрать сейчас")
+    rn.add_argument("--wait", action="store_true", help="дождаться, пока только что положенные файлы отстоятся")
+    rn.set_defaults(fn=inbox_run)
+    kk = ib.add_parser("kick", help="запустить разбор службой и не ждать конца")
+    kk.add_argument("--json", action="store_true", help="вывод для программ")
+    kk.set_defaults(fn=inbox_kick)
+    ss = ib.add_parser("status", help="что настроено и что ждёт")
+    ss.add_argument("--json", action="store_true", help="вывод для программ")
+    ss.set_defaults(fn=inbox_status)
+    bt = ib.add_parser("batches", help="история пачек разбора, от новой к старой")
+    bt.add_argument("--limit", help="сколько пачек показать: от 1 до 200 (по умолчанию 30)")
+    bt.add_argument("--before", metavar="ПАЧКА", help="показать только пачки старше этой")
+    bt.add_argument("--json", action="store_true", help="вывод для программ")
+    bt.set_defaults(fn=inbox_batches)
+    bb = ib.add_parser("batch", help="одна пачка: файлы, решения владельца, где что лежит")
+    bb.add_argument("id", metavar="ПАЧКА", help="номер пачки: ГГГГММДД-ЧЧММСС")
+    bb.add_argument("--json", action="store_true", help="вывод для программ")
+    bb.set_defaults(fn=inbox_batch)
+
+    vs = sub.add_parser("vision", help="описание картинок и сканов без текста локальной моделью со зрением").add_subparsers(
+        dest="action", required=True)
+    vr = vs.add_parser("run", help="отдать долги «ждёт описания» сейчас")
+    vr.add_argument("--limit", help="не больше стольких документов за раз (по умолчанию все, в пределах страниц и минут из настройки)")
+    vr.add_argument("--json", action="store_true", help="вывод для программ")
+    vr.set_defaults(fn=vision_run)
+    vt = vs.add_parser("status", help="сколько документов ждёт описания и сколько описано")
+    vt.add_argument("--json", action="store_true", help="вывод для программ")
+    vt.set_defaults(fn=vision_status)
+    vb = vs.add_parser("backfill", help="записать долгами старые документы корпуса без текста в индексе (не описывает сразу)")
+    vb.add_argument("--limit", help="сколько документов записать (обязателен: старое описывается только порциями)")
+    vb.add_argument("--source", help="только эта база индекса, например tasks или входящие")
+    vb.add_argument("--dry-run", action="store_true", help="только показать, ничего не записывать")
+    vb.add_argument("--json", action="store_true", help="вывод для программ")
+    vb.set_defaults(fn=vision_backfill)
+
+    cn = sub.add_parser("connect", help="настройка MCP для оболочки модели")
+    cn.add_argument("harness", choices=("claude", "codex", "opencode", "dsh", "generic"), help="оболочка")
+    cn.add_argument("--remote", action="store_true", help="оболочка на другой машине tailnet: адрес шлюза")
+    cn.add_argument("--env", default="FLYARCHIVE_TOKEN", help="имя переменной окружения с токеном (по умолчанию FLYARCHIVE_TOKEN)")
+    cn.set_defaults(fn=connect_harness)
+
+    qu = sub.add_parser("queue", help="очередь утверждения").add_subparsers(dest="action", required=True)
+    qk = sub.add_parser("quarantine", help="карантин").add_subparsers(dest="action", required=True)
+    dc = sub.add_parser("doc", help="документ архива").add_subparsers(dest="action", required=True)
+    for group, name, fn, text, needs_path in (
+            (qu, "list", queue_list, "что ждёт решения", False), (qu, "accept", queue_accept, "принять в архив", True),
+            (qu, "quarantine", queue_quarantine, "отправить в карантин", True),
+            (qk, "list", quarantine_list, "что лежит в карантине", False), (qk, "delete", quarantine_delete, "стереть", True),
+            (qk, "return", quarantine_return, "вернуть в папку возврата, не в архив", True),
+            (dc, "delete", doc_delete, "убрать документ из архива и индекса", True)):
+        one = group.add_parser(name, help=text)
+        if fn in (queue_accept, queue_quarantine, quarantine_return):     # от 1 до 200 путей; с --json и «--» перед ними ответ — {"results": [...]}
+            one.add_argument("paths", nargs="*", metavar="путь", help="путь из списка; с --json -- путь… — до 200 путей, ответ results")
+        elif needs_path:
+            one.add_argument("path", help="путь из списка или из выдачи поиска")
+        if fn is queue_accept:
+            one.add_argument("--defer-index", action="store_true", help="не ждать индексации: долг записан, разбор запускает служба")
+        one.add_argument("--json", action="store_true", help="вывод для программ")
+        if fn is doc_delete:
+            one.add_argument("--yes", action="store_true", help="подтверждение удаления")
+        one.set_defaults(fn=fn)
+
+    pv = sub.add_parser("preview", help="просмотр файла очереди, карантина или корпуса: текст, PDF, SVG, картинки, письма, архивы, календарь").add_subparsers(
+        dest="action", required=True)
+    for name, fn, text, positional in (("show", preview_show, "что в файле: вид, сведения, текст или число страниц", ("path",)),
+                                       ("page", preview_page, "страница в PNG в stdout", ("path", "number"))):
+        one = pv.add_parser(name, help=text)
+        one.add_argument("--member", action="append", default=[], metavar="N",
+                         help="вложение письма или архива (до двух ключей: вложение во вложении)")
+        one.add_argument("--area", help="где лежит файл: queue, quarantine или corpus")
+        for argument in positional:
+            one.add_argument(argument, help="путь: очередь/<пачка>/<имя>, карантин/<пачка>/<имя> или от корня корпуса" if argument == "path"
+                             else "номер страницы с 1")
+        if fn is preview_show:
+            one.add_argument("--json", action="store_true", help="вывод для программ")
+        else:
+            one.set_defaults(json=True)                  # у страницы ключа нет, а отказ всегда JSON в последней строке stderr
+        one.set_defaults(fn=fn)
+    pc = pv.add_parser("clean", help="убрать из кэша просмотра старое (7 дней) и лишнее сверх 2 ГБ")
+    pc.add_argument("--json", action="store_true", help="вывод для программ")
+    pc.set_defaults(fn=preview_clean)
+    ps = pv.add_parser("setup", help="скачать образ контейнера для Office, HTML и метафайлов и записать его дайджест")
+    ps.add_argument("--image", help="уже скачанный образ: записать дайджест без сети (иначе скачивается gotenberg/gotenberg:8)")
+    ps.add_argument("--json", action="store_true", help="вывод для программ")
+    ps.set_defaults(fn=preview_setup)
+
+    pm = sub.add_parser("perms", help="права на файлы архива").add_subparsers(dest="action", required=True)
+    for name, fn, text in (("check", perms_check, "проверить, закрыт ли архив от других пользователей"),
+                           ("fix", perms_fix, "закрыть: 700 на каталогах, 600 на файлах")):
+        one = pm.add_parser(name, help=text)
+        one.add_argument("--deep", action="store_true", help="пройти все файлы, а не только верхние каталоги")
+        one.set_defaults(fn=fn)
+
+    box = sub.add_parser("run", help="запустить оболочку внешней модели в песочнице: архива она не видит")
+    box.add_argument("--dir", default=".", help="рабочий каталог оболочки, виден ей на запись (по умолчанию текущий)")
+    box.add_argument("--name", default="default", help="имя оболочки: у каждой свой домашний каталог в песочнице")
+    box.add_argument("--env", action="append", default=[], metavar="ИМЯ",
+                     help="передать внутрь переменную окружения, например с токеном; можно несколько раз")
+    box.add_argument("--ro", action="append", default=[], metavar="КАТАЛОГ",
+                     help="показать каталог только для чтения, например с программой оболочки; можно несколько раз")
+    box.add_argument("command", nargs=argparse.REMAINDER, help="команда оболочки, после --")
+    box.set_defaults(fn=run_sandboxed)
+
+    a = p.parse_args(argv)
+    import doctor                                   # справка уже напечатана разбором аргументов; дальше — только на Linux (FR-107)
+    unsupported = doctor.refusal()
+    if unsupported:
+        print(unsupported, file=sys.stderr)
+        return 2
+    a.dashdash = "--" in (sys.argv[1:] if argv is None else argv)            # пути после «--»: так их зовёт плагин
+    if a.cmd == "token" and a.action == "add" and a.days is not None and a.days <= 0:
+        p.error("--days должен быть положительным")
+    a.caller_umask = perms.close_umask()          # созданное командой в архиве — только владельцу, при любой маске запустившего;
+                                                  # прежняя маска нужна одной команде — run: оболочка модели работает не в архиве
+    try:
+        code = a.fn(auth.Guard("cli"), a)
+    except messages.CodedError as e:              # отказ с кодом: токены, вход, база известного, входящие, решения, история, приёмка
+        message = messages.of(e)
+        if getattr(a, "json", False):             # плагин читает последнюю строку stderr: {"error": {"code", "args", "text"}}
+            print(json.dumps({"error": message.to_json()}, ensure_ascii=False), file=sys.stderr)
+        else:
+            print(f"ошибка: {message}", file=sys.stderr)
+        return 1
+    return code if isinstance(code, int) else 0
+
+
+if __name__ == "__main__":
+    for stream in (sys.stdout, sys.stderr):
+        stream.reconfigure(encoding="utf-8")
+    sys.exit(main())

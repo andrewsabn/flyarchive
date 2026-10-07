@@ -1,0 +1,54 @@
+# Исключения ворот публикации (tests/publication_gate.py). Строка: образец пути | вид | текст | причина.
+#  - образец пути — путь от корня репозитория, «*» — любые знаки, в том числе «/»;
+#  - вид — word, home_path, email, ip, host, secret, working_name, tracked_private, too_large;
+#  - текст — ровно то, что ворота печатают в находке; «*» снимает вид целиком для файла, но не для home_path; для word «*» допустима только с причиной (дословный текст лицензии);
+#  - причина обязательна: строка без причины не принимается и сама становится находкой.
+# Сюда идут только настоящие ложные находки. Выдуманные адреса и имена узлов в образцах тестов сюда не складываем: их заменяют
+# на домены и адреса для документации. Остаётся только то, что тесту нужно именно таким (общеизвестный достижимый адрес): с причиной.
+tests/test_excerpt.py | secret | -----BEGIN RSA PRIVATE KEY | заголовок закрытого ключа как образец для проверки приёмки
+tests/test_excerpt.py | secret | -----BEGIN PRIVATE KEY | заголовок закрытого ключа как образец для проверки приёмки
+tests/test_gate.py | secret | -----BEGIN RSA PRIVATE KEY | заголовок закрытого ключа как образец для проверки приёмки
+tests/gatekit.py | secret | * | образцы файлов Office в base64 для тестов приёмки, не ключи
+tests/test_llm_check.py | secret | sk-l…06[28] | выдуманный ключ в тесте маскировки секретов
+tests/test_excerpt.py | host | https://example.zoom.us/j/123?pwd=AbCd1234Efgh5678 | выдуманная ссылка на видеовстречу в образце письма
+dsh-plugin/lib/client.js | host | token.level.local | ключ словаря уровней токена, не имя узла
+tests/conftest.py | host | a.local | атрибут объекта, не имя узла
+tests/test_llm_check.py | host | c.local.local | атрибут объекта, не имя узла
+tests/test_llm_check.py | host | c.fallback.local | атрибут объекта, не имя узла
+# Обращение к полю объекта, а не имя узла: ворота читают «.local» как зону частной сети.
+tests/characterization/test_mcp_server.py | host | access.local | поле local помощника access: токен уровня «local» (tests/conftest.py), не имя узла
+tests/characterization/test_office_server.py | host | access.local | поле local помощника access: токен уровня «local» (tests/conftest.py), не имя узла
+tests/characterization/test_webui_api.py | host | access.local | поле local помощника access: токен уровня «local» (tests/conftest.py), не имя узла
+tests/test_mcp_annotations.py | host | access.local | поле local помощника access: токен уровня «local» (tests/conftest.py), не имя узла
+tests/test_access_mcp.py | host | srv.access.local | поле local помощника access у стенда srv: токен уровня «local», не имя узла
+tests/test_access_office.py | host | srv.access.local | поле local помощника access у стенда srv: токен уровня «local», не имя узла
+tests/test_access_search.py | host | srv.access.local | поле local помощника access у стенда srv: токен уровня «local», не имя узла
+tests/test_gateway.py | host | net.access.local | поле local помощника access у стенда net: токен уровня «local», не имя узла
+tests/test_access_office.py | host | s.local | функция стенда s, заменяющая внутренний адрес службы на адрес стенда; имя поля, не имя узла
+tests/test_access_search.py | host | s.local | функция стенда s, заменяющая внутренний адрес службы на адрес стенда; имя поля, не имя узла
+tests/test_settings_services.py | host | c.local | поле local проверяющего (Checker): точка локальной модели, не имя узла
+tests/test_vision.py | host | checker.local | поле local проверяющего (Checker): точка локальной модели, не имя узла
+tools/vision.py | host | checker.local | поле local проверяющего (Checker): точка локальной модели в коде и в докстроке, не имя узла
+tests/test_vision_busy_preview.py | host | made.endpoint.local | поле local точки модели: признак «локальная» (True), не имя узла
+# Обрывки образцов негодных значений настройки: ссылкой на узел они не служат.
+tests/test_settings.py | host | http://exa | обрывок образца «http://exa mple.com/»: пробел внутри имени узла делает значение негодным, ссылки тут нет
+tests/test_settings.py | host | ftp://x | образец негодного значения настройки: схема не http и не https, узла «x» не существует
+# Образцы особого вида, которые нельзя заменить адресом для документации.
+tests/test_auth.py | email | 8765@evil.example | часть образца подмены адреса «127.0.0.1:8765@evil.example» в заголовке Host: имя пользователя перед чужим узлом, не почта
+dsh-plugin/e2e/guard.spec.cjs | secret | Zq9X…2d[32] | выдуманное значение-образец «известного секрета» для проверки поиска следов; поиск должен узнать именно такое
+tests/test_preview_container_real.py | ip | 1.1.1.1 | общеизвестный достижимый адрес: тест доказывает, что из контейнера нет сети; адрес для документации недостижим всегда и ничего бы не доказал
+# Имя правообладателя в файлах лицензий: публично по решению владельца; в других файлах оно остаётся находкой.
+dsh-plugin/LICENSE | word | Andrey | имя правообладателя в строке авторского права лицензии MIT плагина
+dsh-plugin/LICENSE | word | Sabynin | фамилия правообладателя в строке авторского права лицензии MIT плагина
+dsh-plugin/LICENSE | word | Андрей | имя правообладателя кириллицей в строке авторского права лицензии MIT плагина
+dsh-plugin/LICENSE | word | Сабынин | фамилия правообладателя кириллицей в строке авторского права лицензии MIT плагина
+LICENSE | word | * | дословный текст лицензии AGPL-3.0: обычные английские слова в нём менять нельзя, слово списка здесь не называется
+# Имя правообладателя в README: строка авторского права рядом с таблицей лицензий.
+README.md | word | Andrey | имя правообладателя в строке авторского права в разделе «Лицензии»
+README.md | word | Sabynin | фамилия правообладателя в строке авторского права в разделе «Лицензии»
+README.md | word | Андрей | имя правообладателя кириллицей в строке авторского права в разделе «Лицензии»
+README.md | word | Сабынин | фамилия правообладателя кириллицей в строке авторского права в разделе «Лицензии»
+README.en.md | word | Andrey | имя правообладателя в строке авторского права английского README
+README.en.md | word | Sabynin | фамилия правообладателя в строке авторского права английского README
+README.md | word | andrewsabn | учётная запись владельца на GitHub в адресе открытого репозитория: команда клонирования
+README.en.md | word | andrewsabn | учётная запись владельца на GitHub в адресе открытого репозитория: команда клонирования

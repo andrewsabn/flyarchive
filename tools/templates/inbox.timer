@@ -1,0 +1,10 @@
+[Unit]
+Description=Разбор входящей папки архива каждые {period} мин
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec={period}min
+AccuracySec=10s
+
+[Install]
+WantedBy=timers.target
