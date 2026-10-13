@@ -6,6 +6,8 @@ Your own document archive with search, on your own machine. You put files into t
 indexes them. You can search it yourself, or give a language model (local or external) access to it over MCP (Model Context Protocol, the way a model
 gets the archive's tools) with a token that you issue.
 
+Why and how it was built: [Our own Google inside the company: the FlyOptima case, 2026](https://sabynin.com/en/blog/own-google-inside-company/).
+
 - **Search by meaning and by words.** Embeddings and a full-text index in one table; everything is computed locally.
 - **Adding documents with strict intake.** The file type is detected from its content, not from its extension. Programs and anything suspicious
   go to quarantine, anything doubtful waits for your decision, and duplicates are not accepted. Nothing is lost: every file gets a receipt, and what the archive did not take is returned to the return folder (only saved exact copies and what is not content are
